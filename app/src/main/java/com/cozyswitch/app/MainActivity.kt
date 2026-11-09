@@ -35,11 +35,13 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         Installer.appVisible = true
         Updater.onResume(this)
+        com.cozyswitch.app.data.LiveLink.start(this) // standing cloud link while the app is open, like CozyLife
     }
 
     override fun onPause() {
         super.onPause()
         Installer.appVisible = false
+        com.cozyswitch.app.data.LiveLink.stopSoon()
         PlugWidget.updateAll(this)
     }
 }

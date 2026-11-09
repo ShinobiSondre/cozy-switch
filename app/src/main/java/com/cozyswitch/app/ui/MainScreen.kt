@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -30,6 +31,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ListAlt
 import androidx.compose.material.icons.filled.Power
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SystemUpdate
@@ -117,6 +119,7 @@ private fun Screen(modifier: Modifier = Modifier) {
     var addingIp by remember { mutableStateOf(false) }
     var signingIn by remember { mutableStateOf(false) }
     var settingUp by remember { mutableStateOf(false) }
+    var showLog by remember { mutableStateOf(false) }
     // Plugs in setup mode heard over Bluetooth, offered like CozyLife's "device to be added".
     val setup = remember { PlugSetup(ctx) }
     var waiting by remember { mutableStateOf<List<FoundPlug>>(emptyList()) }
@@ -217,6 +220,9 @@ private fun Screen(modifier: Modifier = Modifier) {
             IconButton(onClick = { refresh(force = true) }, enabled = !refreshing) {
                 if (refreshing) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = Accent)
                 else Icon(Icons.Filled.Refresh, "Refresh", tint = Color.White)
+            }
+            IconButton(onClick = { showLog = true }) {
+                Icon(Icons.Filled.ListAlt, "Connection log", tint = Color.White)
             }
             IconButton(onClick = {
                 scope.launch { message = Updater.checkNow(ctx) }
@@ -380,6 +386,31 @@ private fun Screen(modifier: Modifier = Modifier) {
             onSave = { name -> Plugs.rename(ctx, p.did, name); editing = null },
             onMove = { by -> Plugs.move(ctx, p.did, by) },
             onRemove = { Plugs.remove(ctx, p.did); editing = null },
+        )
+    }
+
+    if (showLog) {
+        val lines = remember { com.cozyswitch.app.data.ConnLog.all(ctx).reversed() }
+        AlertDialog(
+            onDismissRequest = { showLog = false },
+            title = { Text("Connection log") },
+            text = {
+                androidx.compose.foundation.lazy.LazyColumn(Modifier.heightIn(max = 480.dp)) {
+                    if (lines.isEmpty()) item { Text("Nothing yet.", color = Dim, fontSize = 13.sp) }
+                    items(lines) { Text(it, color = Color.White, fontSize = 11.sp, modifier = Modifier.padding(vertical = 2.dp)) }
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val send = android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain")
+                        .putExtra(android.content.Intent.EXTRA_TEXT,
+                            "Cozy Switch v${BuildConfig.VERSION_NAME} connection log\n\n" + lines.reversed().joinToString("\n"))
+                    ctx.startActivity(android.content.Intent.createChooser(send, "Share the log"))
+                }) { Text("Share") }
+            },
+            dismissButton = {
+                TextButton(onClick = { com.cozyswitch.app.data.ConnLog.clear(ctx); showLog = false }) { Text("Clear") }
+            }
         )
     }
 

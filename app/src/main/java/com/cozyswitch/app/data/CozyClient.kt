@@ -36,6 +36,31 @@ class CozyClient(
         const val CMD_QUERY = 2
         const val CMD_SET = 3
         private val sn = AtomicLong(System.currentTimeMillis())
+
+        private const val IDLE_MS = 20_000L
+        private class Conn(val s: Socket, val r: ObjectReader) {
+            @Volatile var lastUse = System.currentTimeMillis()
+            fun close() { try { s.close() } catch (_: Exception) { } }
+        }
+        private val pool = java.util.concurrent.ConcurrentHashMap<String, Conn>()
+        private val locks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+        @Volatile private var reaper: Thread? = null
+
+        /** Closes idle connections so the plug is free for other apps (it takes one connection at a time). */
+        private fun startReaper() {
+            if (reaper?.isAlive == true) return
+            reaper = Thread {
+                while (pool.isNotEmpty()) {
+                    try { Thread.sleep(5_000) } catch (_: InterruptedException) { break }
+                    val now = System.currentTimeMillis()
+                    for ((k, c) in pool.entries.toList()) {
+                        synchronized(locks.getOrPut(k) { Any() }) {
+                            if (now - c.lastUse >= IDLE_MS) { pool.remove(k); c.close() }
+                        }
+                    }
+                }
+            }.apply { isDaemon = true; start() }
+        }
         fun nextSn(): String = sn.incrementAndGet().toString()
 
         fun packet(cmd: Int, sn: String, msg: JSONObject): ByteArray =
@@ -108,10 +133,30 @@ class CozyClient(
         return null
     }
 
-    private fun <T> withPlug(ip: String, block: (Socket, ObjectReader) -> T): T? = try {
-        open(ip).use { s -> block(s, ObjectReader(s.getInputStream())) }
-    } catch (_: Exception) {
-        null
+    /**
+     * Runs [block] on a connection to the plug. Like the CozyLife app's socket pool, a working
+     * connection is kept and reused for the next command (closed after ~20 s idle), instead of
+     * opening a new one every time. If a reused connection has gone stale, one fresh try follows.
+     */
+    private fun <T> withPlug(ip: String, block: (Socket, ObjectReader) -> T?): T? {
+        val key = "$ip:$port"
+        synchronized(locks.getOrPut(key) { Any() }) {
+            pool[key]?.let { c ->
+                if (!c.s.isClosed && System.currentTimeMillis() - c.lastUse < IDLE_MS) {
+                    try { block(c.s, c.r)?.let { c.lastUse = System.currentTimeMillis(); return it } } catch (_: Exception) { }
+                }
+                pool.remove(key); c.close()
+            }
+            return try {
+                val s = open(ip)
+                val c = Conn(s, ObjectReader(s.getInputStream()))
+                val res = try { block(s, c.r) } catch (e: Exception) { c.close(); throw e }
+                if (res != null) { c.lastUse = System.currentTimeMillis(); pool[key] = c; startReaper() } else c.close()
+                res
+            } catch (_: Exception) {
+                null
+            }
+        }
     }
 
     /** True if something answers on the plug port at all (used when scanning). */

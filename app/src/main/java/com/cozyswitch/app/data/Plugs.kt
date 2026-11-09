@@ -8,6 +8,7 @@ import com.cozyswitch.app.widget.PlugWidget
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -248,6 +249,7 @@ object Plugs {
     }
 
     @Volatile private var lastRefresh = 0L
+    @Volatile private var lastSummary = ""
 
     /**
      * Updates every plug's state. Like the CozyLife app, it reads from CozyLife's cloud when signed
@@ -291,7 +293,7 @@ object Plugs {
                         else -> {
                             // 2. Not in the cloud answer: ask the plug (Wi-Fi, then relay).
                             var o = reach(p, home, System.currentTimeMillis(), { ip -> oneAtATime(p.did) { c.query(ip) } },
-                                { cp -> try { relay.query(cp) } catch (_: CloudError) { null } })
+                                { cp -> try { kotlinx.coroutines.runBlocking { LiveLink.send(cp, null) } ?: relay.query(cp) } catch (_: CloudError) { null } })
                             if (o.on == null && home && !p.hasCloud) {
                                 // 3. It may have a new address: ask the Wi-Fi who's there (quick UDP call).
                                 val ip = Discovery.find(ctx, p.did)
@@ -309,6 +311,11 @@ object Plugs {
         }.toMap()
         edit(ctx) { l -> l.map { p -> results[p.did]?.let { (o, off) -> p.withOutcome(o, off) } ?: p } }
         PlugWidget.updateAll(ctx)
+        val summary = load(ctx).joinToString { p ->
+            "${p.name}=" + (if (!p.online) "offline" else when (p.on) { true -> "on"; false -> "off"; null -> "?" }) +
+                (if (cloudStates.containsKey(p.did)) "(cloud)" else "")
+        } + if (token != null && cloudStates.isEmpty()) "  [cloud status unavailable]" else ""
+        if (summary != lastSummary) { lastSummary = summary; ConnLog.add(ctx, "status: $summary") }
 
         // Plugs that dropped off: reconnect them over Bluetooth if they're near, like CozyLife.
         val now2 = System.currentTimeMillis()
@@ -322,38 +329,87 @@ object Plugs {
      * Wi-Fi once (the router may have moved it) and tries again.
      */
     suspend fun switch(ctx: Context, did: String, on: Boolean): Boolean? = withContext(Dispatchers.IO) {
+        val start = System.currentTimeMillis()
         var p = load(ctx).firstOrNull { it.did == did } ?: return@withContext null
         val home = onWifi(ctx)
         lastCloudError = null
         val c = client(ctx)
-        val cloudSet: (CloudPlug) -> Boolean? = { cp ->
-            try { CozyRelay().set(cp, on) } catch (e: CloudError) { lastCloudError = e.message; null }
+        val now = System.currentTimeMillis()
+        val tryLocal = home && p.ip.isNotEmpty() && (!p.hasCloud || p.fails < STUCK_AFTER || now >= p.probeAt)
+        var fails = p.fails
+        var probeAt = p.probeAt
+
+        suspend fun cloudOnce(cp: CloudPlug): Boolean? = try {
+            // The standing link if it's up (no setup delay), otherwise a one-off connection.
+            LiveLink.send(cp, on) ?: CozyRelay().set(cp, on)
+        } catch (e: CloudError) { lastCloudError = e.message; null }
+
+        // 1. Like the CozyLife app: send over Wi-Fi and the cloud at the same time; first answer wins.
+        val winner = kotlinx.coroutines.channels.Channel<Pair<Boolean, String>?>(4)
+        var won: Pair<Boolean, String>? = null
+        // Detached, so a slow path never holds up the answer from a fast one.
+        run {
+            val race = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+            val jobs = mutableListOf<kotlinx.coroutines.Job>()
+            if (tryLocal) jobs += race.launch {
+                val r = oneAtATime(did) { c.set(p.ip, on) }
+                ConnLog.add(ctx, "${p.name}: Wi-Fi ${p.ip} → ${r ?: "no answer"} (${System.currentTimeMillis() - start} ms)")
+                if (r == null) { fails++; if (fails >= STUCK_AFTER) probeAt = System.currentTimeMillis() + PROBE_EVERY_MS } else fails = 0
+                winner.send(r?.let { it to "wifi" })
+            }
+            if (p.hasCloud) jobs += race.launch {
+                var r = cloudOnce(p.cloud())
+                if (r == null) {
+                    // The plug may have moved to another relay: fetch the address and try once more.
+                    syncCloud(ctx)
+                    val fresh = load(ctx).firstOrNull { it.did == did }
+                    if (fresh != null && fresh.hasCloud && (fresh.relayHost != p.relayHost || fresh.relayPort != p.relayPort)) {
+                        r = cloudOnce(fresh.cloud())
+                    }
+                }
+                ConnLog.add(ctx, "${p.name}: cloud ${p.relayHost}:${p.relayPort} → ${r ?: (lastCloudError ?: "no answer")} (${System.currentTimeMillis() - start} ms)")
+                winner.send(r?.let { it to "cloud" })
+            }
+            var left = jobs.size
+            kotlinx.coroutines.withTimeoutOrNull(15_000) {
+                while (left > 0) {
+                    val r = winner.receive(); left--
+                    if (r != null) { won = r; break }
+                }
+            }
+            jobs.forEach { it.cancel() }
         }
-        // 1. Wi-Fi first (unless that path is known to be stuck), then the cloud relay.
-        var o = reach(p, home, System.currentTimeMillis(), { ip -> oneAtATime(did) { c.set(ip, on) } }, cloudSet)
-        // 2. At home: the router may have moved the plug. A quick UDP call finds it.
-        if (o.on == null && home && p.ip.isNotEmpty()) {
+        // 2. At home and no answer: the router may have moved the plug. A quick UDP call finds it.
+        if (won == null && home && p.ip.isNotEmpty()) {
             val ip = Discovery.find(ctx, did)
             if (ip != null && ip != p.ip) {
                 replace(ctx, did) { it.copy(ip = ip) }
-                oneAtATime(did) { c.set(ip, on) }?.let { o = Outcome(it, "wifi", 0, 0) }
+                val r = oneAtATime(did) { c.set(ip, on) }
+                ConnLog.add(ctx, "${p.name}: moved to $ip → ${r ?: "no answer"}")
+                if (r != null) { won = r to "wifi"; fails = 0 }
             }
         }
-        // 3. The cloud may have moved the plug to another relay: fetch the address again and retry.
-        if (o.on == null && token(ctx) != null) {
-            syncCloud(ctx)
-            p = load(ctx).firstOrNull { it.did == did } ?: p
-            if (p.hasCloud) cloudSet(p.cloud())?.let { o = Outcome(it, "cloud", o.fails, o.probeAt) }
-        }
-        // 4. Bluetooth, like the CozyLife app (which sends every command over Bluetooth too).
-        //    Also re-registers the plug, which is how CozyLife brings a dropped plug back.
-        if (o.on == null) {
+        // 3. Bluetooth, like the CozyLife app, which also re-registers the plug with the cloud.
+        if (won == null) {
             lastBleTry[did] = System.currentTimeMillis()
-            PlugSetup(ctx).bleSet(did, on, reregisterFor(ctx, p))?.let { o = Outcome(it, "bluetooth", o.fails, o.probeAt) }
+            p = load(ctx).firstOrNull { it.did == did } ?: p
+            val r = PlugSetup(ctx).bleSet(did, on, reregisterFor(ctx, p))
+            ConnLog.add(ctx, "${p.name}: Bluetooth → ${r ?: "not found / no answer"}")
+            if (r != null) won = r to "bluetooth"
         }
+        val o = Outcome(won?.first, won?.second ?: "", fails, probeAt)
         replace(ctx, did) { it.withOutcome(o) }
+        ConnLog.add(ctx, "${p.name}: turn ${if (on) "on" else "off"} → ${won?.let { "OK via ${it.second}" } ?: "FAILED"} in ${System.currentTimeMillis() - start} ms")
         PlugWidget.updateAll(ctx)
         o.on
+    }
+
+    /** A plug reported its state by itself (over the standing cloud link). */
+    fun pushed(ctx: Context, did: String, on: Boolean) {
+        val p = load(ctx).firstOrNull { it.did == did } ?: return
+        if (p.on == on && p.online) return
+        replace(ctx, did) { it.copy(on = on, online = true, misses = 0, seenAt = System.currentTimeMillis()) }
+        PlugWidget.updateAll(ctx)
     }
 
     /** Set when CozyLife refuses the saved sign-in; the screen asks to sign in again. */
@@ -426,6 +482,7 @@ object Plugs {
         val p = load(ctx).firstOrNull { it.did == did } ?: return@withContext false
         lastBleTry[did] = System.currentTimeMillis()
         val state = PlugSetup(ctx).bleSet(did, null, reregisterFor(ctx, p))
+        ConnLog.add(ctx, "${p.name}: reconnect over Bluetooth → ${if (state != null) "answered, told to rejoin CozyLife" else "not found / no answer"}")
         if (state != null) replace(ctx, did) { it.withOutcome(Outcome(state, "bluetooth", it.fails, it.probeAt)) }
         PlugWidget.updateAll(ctx)
         state != null
