@@ -18,6 +18,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         Updater.start(this)
         UpdateWorker.schedule(this)
+        com.cozyswitch.app.auto.Scheduler.rescheduleAll(this)
         if (Build.VERSION.SDK_INT >= 33) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }

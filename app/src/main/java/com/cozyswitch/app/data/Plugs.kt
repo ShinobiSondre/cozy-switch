@@ -131,6 +131,7 @@ object Plugs {
 
     fun remove(ctx: Context, did: String) {
         edit(ctx) { l -> l.filterNot { it.did == did } }
+        Automations.forgetPlug(ctx, did)
         PlugWidget.updateAll(ctx)
     }
 

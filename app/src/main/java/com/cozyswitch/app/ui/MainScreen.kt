@@ -11,7 +11,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -74,12 +84,23 @@ private val Dim = Color.White.copy(alpha = 0.6f)
 @Composable
 fun MainScreen() {
     MaterialTheme(colorScheme = darkColorScheme(primary = Accent, onPrimary = Color(0xFF14202C))) {
-        Screen()
+        var tab by rememberSaveable { mutableIntStateOf(0) }
+        Column(Modifier.fillMaxSize().background(Bg)) {
+            val top = Modifier.weight(1f)
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+            if (tab == 0) Screen(top) else AutomationsScreen(top)
+            NavigationBar(containerColor = Color(0xFF131D27)) {
+                NavigationBarItem(tab == 0, { tab = 0 }, icon = { Icon(Icons.Filled.Power, null) }, label = { Text("Plugs") },
+                    colors = NavigationBarItemDefaults.colors(indicatorColor = Accent.copy(alpha = 0.25f)))
+                NavigationBarItem(tab == 1, { tab = 1 }, icon = { Icon(Icons.Filled.Schedule, null) }, label = { Text("Automations") },
+                    colors = NavigationBarItemDefaults.colors(indicatorColor = Accent.copy(alpha = 0.25f)))
+            }
+        }
     }
 }
 
 @Composable
-private fun Screen() {
+private fun Screen(modifier: Modifier = Modifier) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val plugs = remember { mutableStateListOf<Plug>().apply { addAll(Plugs.load(ctx)) } }
@@ -136,7 +157,7 @@ private fun Screen() {
         onPauseOrDispose { }
     }
 
-    Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().padding(horizontal = 16.dp)) {
+    Column(modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Cozy Switch", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
