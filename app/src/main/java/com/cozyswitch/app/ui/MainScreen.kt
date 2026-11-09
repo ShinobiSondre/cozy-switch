@@ -113,6 +113,7 @@ private fun Screen(modifier: Modifier = Modifier) {
     var editing by remember { mutableStateOf<Plug?>(null) }
     var addingIp by remember { mutableStateOf(false) }
     var signingIn by remember { mutableStateOf(false) }
+    var settingUp by remember { mutableStateOf(false) }
     var account by remember { mutableStateOf(Plugs.accountEmail(ctx)) }
     val cloudReady = plugs.any { it.hasCloud }
 
@@ -263,6 +264,9 @@ private fun Screen(modifier: Modifier = Modifier) {
                 Text("Add by IP", color = Color.White)
             }
         }
+        TextButton(onClick = { settingUp = true }, modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+            Text("Set up a new or reset plug (Bluetooth)")
+        }
     }
 
     editing?.let { p ->
@@ -274,6 +278,8 @@ private fun Screen(modifier: Modifier = Modifier) {
             onRemove = { Plugs.remove(ctx, p.did); editing = null },
         )
     }
+
+    if (settingUp) SetupDialog(onClose = { settingUp = false; refresh(force = true) })
 
     if (signingIn) {
         var email by remember { mutableStateOf("") }
