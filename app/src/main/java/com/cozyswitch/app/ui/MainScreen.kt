@@ -113,6 +113,7 @@ private fun Screen(modifier: Modifier = Modifier) {
     var message by remember { mutableStateOf<String?>(null) }
     var onWifi by remember { mutableStateOf(Plugs.onWifi(ctx)) }
     var editing by remember { mutableStateOf<Plug?>(null) }
+    var cloudProblem by remember { mutableStateOf(Plugs.cloudProblem) }
     var addingIp by remember { mutableStateOf(false) }
     var signingIn by remember { mutableStateOf(false) }
     var settingUp by remember { mutableStateOf(false) }
@@ -141,9 +142,16 @@ private fun Screen(modifier: Modifier = Modifier) {
         if (refreshing) return
         refreshing = true
         scope.launch {
-            onWifi = Plugs.onWifi(ctx)
-            Plugs.refresh(ctx, force)
-            refreshing = false
+            try {
+                onWifi = Plugs.onWifi(ctx)
+                kotlinx.coroutines.withTimeoutOrNull(30_000) { Plugs.refresh(ctx, force) }
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e
+            } catch (_: Exception) {
+            } finally {
+                refreshing = false
+                onWifi = Plugs.onWifi(ctx)
+                cloudProblem = Plugs.cloudProblem
+            }
         }
     }
 
@@ -164,9 +172,31 @@ private fun Screen(modifier: Modifier = Modifier) {
     }
 
     LifecycleResumeEffect(Unit) {
-        refresh()
         btAllowed = setup.hasPermission()
-        onPauseOrDispose { }
+        // While the screen is open: refresh now and keep refreshing (cloud status is cheap;
+        // without the cloud, plugs are asked less often because asking them a lot makes them freeze).
+        val loop = scope.launch {
+            while (true) {
+                refresh(force = true)
+                kotlinx.coroutines.delay(if (plugs.any { it.hasCloud }) 20_000 else 60_000)
+            }
+        }
+        // Wi-Fi on/off or a different network: refresh straight away.
+        val cm = ctx.getSystemService(android.net.ConnectivityManager::class.java)
+        var pending: kotlinx.coroutines.Job? = null
+        val netCb = object : android.net.ConnectivityManager.NetworkCallback() {
+            fun soon() {
+                pending?.cancel()
+                pending = scope.launch { kotlinx.coroutines.delay(2_000); refresh(force = true) }
+            }
+            override fun onAvailable(network: android.net.Network) = soon()
+            override fun onLost(network: android.net.Network) = soon()
+        }
+        try { cm.registerDefaultNetworkCallback(netCb) } catch (_: Exception) { }
+        onPauseOrDispose {
+            loop.cancel(); pending?.cancel()
+            try { cm.unregisterNetworkCallback(netCb) } catch (_: Exception) { }
+        }
     }
 
     // Listen for plugs waiting to be added while this screen is open (paused during a setup).
@@ -209,6 +239,16 @@ private fun Screen(modifier: Modifier = Modifier) {
             Spacer(Modifier.height(10.dp))
         }
 
+        cloudProblem?.let { prob ->
+            Column(
+                Modifier.fillMaxWidth().padding(bottom = 10.dp).clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xFF3A2A12)).padding(12.dp)
+            ) {
+                Text("CozyLife stopped accepting your sign-in ($prob). Sign in again to keep plugs working away from home.",
+                    color = Color.White, fontSize = 13.sp)
+                TextButton(onClick = { signingIn = true }) { Text("Sign in again") }
+            }
+        }
         val toAdd = waiting.filter { it.device.address !in notNow }
         if (toAdd.isNotEmpty()) {
             Column(
@@ -268,8 +308,11 @@ private fun Screen(modifier: Modifier = Modifier) {
                     onToggle = { want ->
                         busy += p.did
                         scope.launch {
-                            val r = Plugs.switch(ctx, p.did, want)
-                            busy -= p.did
+                            val r = try {
+                                kotlinx.coroutines.withTimeoutOrNull(45_000) { Plugs.switch(ctx, p.did, want) }
+                            } catch (e: kotlinx.coroutines.CancellationException) { throw e
+                            } catch (_: Exception) { null
+                            } finally { busy -= p.did }
                             if (r == null) message = Plugs.lastCloudError?.let { "${p.name}: $it" }
                                 ?: "${p.name} didn't answer. Is it plugged in and on the Wi-Fi?"
                         }
@@ -360,6 +403,7 @@ private fun Screen(modifier: Modifier = Modifier) {
                     scope.launch {
                         try {
                             val n = Plugs.signIn(ctx, email, pw)
+                            cloudProblem = null
                             account = Plugs.accountEmail(ctx)
                             signingIn = false
                             message = if (n == 0) "Signed in, but the account has no plugs."

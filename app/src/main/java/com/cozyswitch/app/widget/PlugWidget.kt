@@ -47,8 +47,19 @@ class PlugWidget : AppWidgetProvider() {
         const val ACTION_REFRESH = "com.cozyswitch.app.REFRESH"
         const val EXTRA_DID = "did"
 
-        private val busy = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-        @Volatile private var refreshing = false
+        // Plugs being switched, with when it started; anything older than 60 s is treated as done,
+        // so a lost switch can never leave the widget stuck on "…".
+        private val busySince = java.util.concurrent.ConcurrentHashMap<String, Long>()
+        private val busy = object {
+            operator fun plusAssign(did: String) { busySince[did] = System.currentTimeMillis() }
+            operator fun minusAssign(did: String) { busySince.remove(did) }
+            operator fun contains(did: String) =
+                busySince[did]?.let { System.currentTimeMillis() - it < 60_000 } == true
+        }
+        @Volatile private var refreshingSince = 0L
+        private var refreshing: Boolean
+            get() = System.currentTimeMillis() - refreshingSince < 45_000
+            set(v) { refreshingSince = if (v) System.currentTimeMillis() else 0L }
 
         fun updateAll(ctx: Context) = draw(ctx)
 

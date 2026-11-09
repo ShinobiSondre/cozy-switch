@@ -267,9 +267,13 @@ object Plugs {
         if (token != null) {
             try {
                 val devices = CozyAccount().devices(token)
+                cloudProblem = null
                 applyCloud(ctx, devices)
                 devices.forEach { cloudOnline[it.did] = it.online }
                 cloudStates = CozyAccount().states(token, devices.filter { it.online }.map { it.did })
+            } catch (e: CloudError) {
+                // CozyLife answered but refused: usually an expired sign-in. (Network trouble isn't this.)
+                if (e.message?.startsWith("Couldn't reach") != true) cloudProblem = e.message
             } catch (_: Exception) { }
         }
 
@@ -279,7 +283,7 @@ object Plugs {
         val relay = CozyRelay()
         val results = coroutineScope {
             list.map { p ->
-                async {
+                async { try {
                     val fromCloud = cloudStates[p.did]
                     when {
                         fromCloud != null -> p.did to (Outcome(fromCloud, if (p.via == "wifi") "wifi" else "cloud", p.fails, p.probeAt) to false)
@@ -299,7 +303,8 @@ object Plugs {
                             p.did to (o to false)
                         }
                     }
-                }
+                } catch (e: kotlinx.coroutines.CancellationException) { throw e
+                } catch (_: Exception) { p.did to (Outcome(null, "", p.fails, p.probeAt) to false) } }
             }.awaitAll()
         }.toMap()
         edit(ctx) { l -> l.map { p -> results[p.did]?.let { (o, off) -> p.withOutcome(o, off) } ?: p } }
@@ -338,6 +343,9 @@ object Plugs {
         PlugWidget.updateAll(ctx)
         o.on
     }
+
+    /** Set when CozyLife refuses the saved sign-in; the screen asks to sign in again. */
+    @Volatile var cloudProblem: String? = null
 
     /** Why the last cloud switch failed, in words, if it did. */
     @Volatile var lastCloudError: String? = null
