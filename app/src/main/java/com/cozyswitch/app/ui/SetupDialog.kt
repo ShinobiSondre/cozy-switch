@@ -78,7 +78,8 @@ fun SetupDialog(waiting: List<FoundPlug> = emptyList(), onClose: () -> Unit) {
     val log = remember { mutableStateListOf<String>() }
     var error by remember { mutableStateOf<String?>(null) }
     var job by remember { mutableStateOf<Job?>(null) }
-    val session = remember { Plugs.session(ctx) }
+    var session by remember { mutableStateOf(Plugs.session(ctx)) }
+    var checkingSession by remember { mutableStateOf(session == null) }
     val known = remember { Plugs.load(ctx).associate { it.did to it.name } }
 
     DisposableEffect(Unit) { onDispose { job?.cancel() } }
@@ -131,8 +132,11 @@ fun SetupDialog(waiting: List<FoundPlug> = emptyList(), onClose: () -> Unit) {
         }
     }
 
-    // Same Wi-Fi as last time and one plug waiting: go straight to setting it up.
+    // Older sign-ins lack the user id: fetch it instead of asking to sign in again.
+    // Then, with the same Wi-Fi as last time and one plug waiting, go straight to setting it up.
     androidx.compose.runtime.LaunchedEffect(Unit) {
+        if (session == null) session = Plugs.ensureSession(ctx)
+        checkingSession = false
         if (stage == Stage.Wifi && saved != null && session != null) go()
     }
 
@@ -147,7 +151,9 @@ fun SetupDialog(waiting: List<FoundPlug> = emptyList(), onClose: () -> Unit) {
             val dim = Color.White.copy(alpha = 0.65f)
             when (stage) {
                 Stage.Intro -> {
-                    if (session == null) {
+                    if (checkingSession) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    } else if (session == null) {
                         Text("Sign in to CozyLife first (the \"Away from home\" card on the Plugs tab). The plug " +
                             "registers itself to your account during setup, so it needs your sign-in.\n\n" +
                             "If you're already signed in, sign out and in again once.", color = Color.White, fontSize = 14.sp)
@@ -194,7 +200,10 @@ fun SetupDialog(waiting: List<FoundPlug> = emptyList(), onClose: () -> Unit) {
                         TextButton(onClick = { job?.cancel(); onClose() }) { Text("Cancel") }
                     }
                 }
-                Stage.Wifi -> {
+                Stage.Wifi -> if (session == null && !checkingSession) {
+                    Text("Sign in to CozyLife first (the \"Away from home\" card on the Plugs tab).", color = Color.White, fontSize = 14.sp)
+                    TextButton(onClick = onClose) { Text("OK") }
+                } else {
                     chosen?.let { c ->
                         Text(known[c.advert.deviceId]?.let { "$it is back in setup mode. It keeps its name and automations." }
                             ?: "New plug …${c.advert.deviceId.takeLast(4)}", color = Color.White, fontSize = 14.sp,

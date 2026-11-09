@@ -80,4 +80,35 @@ class SetupProtocolTest {
 
     @Test fun ignoresOtherBluetoothDevices() =
         assertNull(SetupProtocol.parseAdvert(SetupProtocol.unhex("0201060303AAFE" + "00".repeat(50))))
+
+    @Test fun bluetoothOnOffMatchesTheCozyLifeApp() {
+        assertEquals("030201FF", SetupProtocol.setCommand(true, false))
+        assertEquals("03020100", SetupProtocol.setCommand(false, false))
+        assertEquals("030305000001FF000000".substring(0, 2) + "03" + "0500" + "01" + "FF000000", SetupProtocol.setCommand(true, true))
+    }
+
+    @Test fun reconnectKeepsTheWifiAndCarriesKeyAndToken() {
+        val c = SetupProtocol.reconnectCommand(token, "abcdef1987091727", false)
+        assertEquals(2 + 153 * 2 + 2, c.length)
+        assertTrue(c.startsWith("0199" + "01".repeat(32) + "0".repeat(128) + "000000000000"))
+        assertTrue(c.contains(SetupProtocol.hex("1987091727".toByteArray()).lowercase()))
+    }
+
+    @Test fun readsSwitchStateFromClassicReply() {
+        val r = SetupProtocol.Reply(3, null, SetupProtocol.unhex("030201FF" + "000000"))
+        assertEquals(true, SetupProtocol.switchState(r, false))
+        assertEquals(false, SetupProtocol.switchState(SetupProtocol.Reply(10, null, SetupProtocol.unhex("03020100")), false))
+    }
+
+    @Test fun readsSwitchStateFromV5Reply() {
+        val r = SetupProtocol.Reply(3, null, SetupProtocol.unhex("03050001FF000000"))
+        assertEquals(true, SetupProtocol.switchState(r, true))
+    }
+
+    @Test fun v5SetFrameCarriesTheRecord() {
+        val f = SetupProtocol.frameV5(SetupProtocol.setCommand(true, true), 100, sn = 1).single()
+        val msg = f.copyOfRange(5, f.size - 1)
+        assertEquals(3, msg[0].toInt())
+        assertEquals("03050001FF000000", SetupProtocol.hex(msg.copyOfRange(8, msg.size)))
+    }
 }

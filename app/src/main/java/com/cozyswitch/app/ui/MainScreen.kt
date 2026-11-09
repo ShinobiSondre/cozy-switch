@@ -317,7 +317,17 @@ private fun Screen(modifier: Modifier = Modifier) {
                                 ?: "${p.name} didn't answer. Is it plugged in and on the Wi-Fi?"
                         }
                     },
-                    onEdit = { editing = p }
+                    onEdit = { editing = p },
+                    onReconnect = {
+                        busy += p.did
+                        scope.launch {
+                            val ok = try { Plugs.reconnect(ctx, p.did) } catch (e: kotlinx.coroutines.CancellationException) { throw e
+                            } catch (_: Exception) { false } finally { busy -= p.did }
+                            message = if (ok) "${p.name} answered over Bluetooth and was told to rejoin CozyLife. It should be back within a minute."
+                            else "${p.name} wasn't found over Bluetooth. Go closer to it (and allow Nearby devices), or unplug it for 10 seconds."
+                            refresh(force = true)
+                        }
+                    }
                 )
             }
             item {
@@ -452,7 +462,7 @@ private fun Screen(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun PlugCard(p: Plug, busy: Boolean, onToggle: (Boolean) -> Unit, onEdit: () -> Unit) {
+private fun PlugCard(p: Plug, busy: Boolean, onToggle: (Boolean) -> Unit, onEdit: () -> Unit, onReconnect: () -> Unit = {}) {
     val on = p.on == true
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(CardBg)
@@ -472,16 +482,17 @@ private fun PlugCard(p: Plug, busy: Boolean, onToggle: (Boolean) -> Unit, onEdit
             Text(p.name, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
             Text(
                 (if (!p.online) "Offline" else when (p.on) { true -> "On"; false -> "Off"; null -> "Checking…" }) +
-                    when (p.via) { "wifi" -> "  ·  via Wi-Fi"; "cloud" -> "  ·  via cloud ☁"; else -> "" },
+                    when (p.via) { "wifi" -> "  ·  via Wi-Fi"; "cloud" -> "  ·  via cloud ☁"; "bluetooth" -> "  ·  via Bluetooth"; else -> "" },
                 color = if (!p.online) Color(0xFFFFB27A) else Dim, fontSize = 12.sp
             )
             val hint = when {
-                !p.online -> "Not answering. If it stays like this, unplug it for 10 seconds and plug it back in."
+                !p.online -> "Not answering. Tap Reconnect (uses Bluetooth, stand near the plug). If that fails, unplug it for 10 seconds."
                 p.wifiStuck && p.via == "cloud" ->
                     "Its Wi-Fi connection is stuck, so the cloud is used. Unplugging it for 10 s fixes that."
                 else -> null
             }
             hint?.let { Text(it, color = Color(0xFFFFB27A), fontSize = 12.sp) }
+            if (!p.online) TextButton(onClick = onReconnect, enabled = !busy) { Text("Reconnect") }
         }
         if (busy) {
             CircularProgressIndicator(Modifier.size(24.dp).padding(end = 4.dp), strokeWidth = 2.dp, color = Accent)

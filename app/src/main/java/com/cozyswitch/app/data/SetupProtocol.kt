@@ -85,6 +85,64 @@ object SetupProtocol {
         return "01$len$ssidHex$pwdHex$bssidHex$keyHex$tokenHex$latLng$domain".uppercase()
     }
 
+    /**
+     * "Keep your Wi-Fi, but register again with this account" (SingleBleDevice
+     * .getBleToDeviceSendConfigNetInfoCmd1Verify). CozyLife sends this every time it connects to a
+     * plug over Bluetooth; it's what brings a plug that dropped off the cloud back online.
+     * [key] is the last 10 characters of the plug's cloud key.
+     */
+    fun reconnectCommand(token: String, key: String, withDomain: Boolean): String {
+        val keep = "01".repeat(32)
+        val pwdHex = "0".repeat(128)
+        val keyHex = padRight(strHex(key.takeLast(10)), 20)
+        val tokenHex = padRight(strHex(token), 66)
+        val domain = if (withDomain) padRight(strHex(DOMAIN), 20) else ""
+        val len = if (withDomain) "A3" else "99"
+        return "01$len$keep$pwdHex" + "000000000000" + "$keyHex$tokenHex" + "0000000000000000" + domain
+    }
+
+    /** Switch on/off over Bluetooth (SingleBleDevice.getBleToDeviceSetDevicePropertyCmd3 / BleV5PkgParser.buildCmd3FromJson). */
+    fun setCommand(on: Boolean, v5: Boolean): String =
+        if (v5) "03" + "03" + "0500" + "01" + (if (on) "FF000000" else "00000000")  // [type 3][len 5][dp 1][uint32 LE]
+        else "0302" + "01" + (if (on) "FF" else "00")                               // [03][len 2][dp 1][value]
+
+    /** Ask for datapoint 1 (getBleToDeviceSearchDeviceInfoCmd2 with attr [1]). */
+    const val QUERY = "020101"
+
+    /** On/off from a Bluetooth reply to command 2, 3 or 10 (datapoint 1), or null. */
+    fun switchState(r: Reply, v5: Boolean): Boolean? {
+        if (r.cmd !in listOf(2, 3, 10)) return null
+        val d = r.data
+        if (v5) {
+            var i = 0
+            while (i + 4 <= d.size) { // [type][len LE16 incl. dpid][dpid][value]
+                val len = (d[i + 1].toInt() and 0xFF) or ((d[i + 2].toInt() and 0xFF) shl 8)
+                if (len < 1 || i + 3 + len > d.size) break
+                val dp = d[i + 3].toInt() and 0xFF
+                if (dp == 1) {
+                    var v = 0L
+                    for (k in 0 until len - 1) v = v or ((d[i + 4 + k].toLong() and 0xFF) shl (8 * k))
+                    return v > 0
+                }
+                i += 3 + len
+            }
+        } else {
+            var i = 0
+            while (i + 3 <= d.size) { // [cmd][len incl. dpid][dpid][value LE]
+                val len = d[i + 1].toInt() and 0xFF
+                if (len == 0 || i + 2 + len > d.size) break
+                val dp = d[i + 2].toInt() and 0xFF
+                if (dp == 1) {
+                    var v = 0L
+                    for (k in 0 until len - 1) v = v or ((d[i + 3 + k].toLong() and 0xFF) shl (8 * k))
+                    return v > 0
+                }
+                i += 2 + len
+            }
+        }
+        return null
+    }
+
     fun crc8(b: ByteArray, from: Int = 0, to: Int = b.size): Int {
         var c = 0
         for (i in from until to) {
@@ -112,8 +170,13 @@ object SetupProtocol {
      */
     fun frameV5(cmdHex: String, dataLen: Int, sn: Int = System.currentTimeMillis().toInt()): List<ByteArray> {
         val cmd = unhex(cmdHex)
-        var payload = if (cmd.size > 2) cmd.copyOfRange(2, cmd.size) else ByteArray(0)
-        if (cmd[0].toInt() == 1 && payload.size > 163) payload = payload.copyOfRange(0, 163)
+        val legacy = if (cmd.size > 2) cmd.copyOfRange(2, cmd.size) else ByteArray(0)
+        val payload = when (cmd[0].toInt()) {
+            1 -> if (legacy.size > 163) legacy.copyOfRange(0, 163) else legacy
+            0 -> legacy.copyOf(4)
+            4, 8 -> legacy
+            else -> cmd.copyOfRange(1, cmd.size) // 2, 3 and others: everything after the command byte
+        }
         val msg = ByteArray(8 + payload.size)
         msg[0] = cmd[0]; msg[1] = 0
         for (k in 0..3) msg[2 + k] = (sn ushr (8 * k)).toByte()

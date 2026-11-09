@@ -107,8 +107,8 @@ class PlugWidget : AppWidgetProvider() {
             val (label, bg) = when {
                 p.did in busy -> "…" to R.drawable.pill_busy
                 !p.online -> "offline" to R.drawable.pill_busy
-                p.on == true -> (if (p.via == "cloud") "ON ☁" else "ON") to R.drawable.pill_on
-                p.on == false -> (if (p.via == "cloud") "OFF ☁" else "OFF") to R.drawable.pill_off
+                p.on == true -> (when (p.via) { "cloud" -> "ON ☁"; "bluetooth" -> "ON ᛒ"; else -> "ON" }) to R.drawable.pill_on
+                p.on == false -> (when (p.via) { "cloud" -> "OFF ☁"; "bluetooth" -> "OFF ᛒ"; else -> "OFF" }) to R.drawable.pill_off
                 else -> "?" to R.drawable.pill_busy
             }
             r.setTextViewText(R.id.state, label)

@@ -309,6 +309,12 @@ object Plugs {
         }.toMap()
         edit(ctx) { l -> l.map { p -> results[p.did]?.let { (o, off) -> p.withOutcome(o, off) } ?: p } }
         PlugWidget.updateAll(ctx)
+
+        // Plugs that dropped off: reconnect them over Bluetooth if they're near, like CozyLife.
+        val now2 = System.currentTimeMillis()
+        load(ctx).filter { !it.online && now2 - (lastBleTry[it.did] ?: 0L) > 5 * 60_000 }.take(2).forEach { p ->
+            try { reconnect(ctx, p.did) } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (_: Exception) { }
+        }
     }
 
     /**
@@ -338,6 +344,12 @@ object Plugs {
             syncCloud(ctx)
             p = load(ctx).firstOrNull { it.did == did } ?: p
             if (p.hasCloud) cloudSet(p.cloud())?.let { o = Outcome(it, "cloud", o.fails, o.probeAt) }
+        }
+        // 4. Bluetooth, like the CozyLife app (which sends every command over Bluetooth too).
+        //    Also re-registers the plug, which is how CozyLife brings a dropped plug back.
+        if (o.on == null) {
+            lastBleTry[did] = System.currentTimeMillis()
+            PlugSetup(ctx).bleSet(did, on, reregisterFor(ctx, p))?.let { o = Outcome(it, "bluetooth", o.fails, o.probeAt) }
         }
         replace(ctx, did) { it.withOutcome(o) }
         PlugWidget.updateAll(ctx)
@@ -390,6 +402,36 @@ object Plugs {
         val u = p.getString("uid", null)?.ifEmpty { null } ?: return null
         return CozyAccount.Session(t, u)
     }
+
+    /** Like [session], but fetches the user id from CozyLife if this sign-in didn't keep it. */
+    suspend fun ensureSession(ctx: Context): CozyAccount.Session? = withContext(Dispatchers.IO) {
+        session(ctx)?.let { return@withContext it }
+        val t = token(ctx) ?: return@withContext null
+        val uid = try { CozyAccount().uid(t) } catch (_: Exception) { null } ?: return@withContext null
+        ctx.getSharedPreferences(ACCOUNT, Context.MODE_PRIVATE).edit().putString("uid", uid).apply()
+        CozyAccount.Session(t, uid)
+    }
+
+    /** What the reconnect message needs: token and the plug's key. */
+    private fun reregisterFor(ctx: Context, p: Plug): Pair<String, String>? {
+        val t = token(ctx) ?: return null
+        return if (p.key.isNotEmpty()) t to p.key else null
+    }
+
+    /**
+     * Brings a plug back the way the CozyLife app does: connect over Bluetooth, read its state,
+     * and tell it to register with the account again (keeping its Wi-Fi). Returns true if it answered.
+     */
+    suspend fun reconnect(ctx: Context, did: String): Boolean = withContext(Dispatchers.IO) {
+        val p = load(ctx).firstOrNull { it.did == did } ?: return@withContext false
+        lastBleTry[did] = System.currentTimeMillis()
+        val state = PlugSetup(ctx).bleSet(did, null, reregisterFor(ctx, p))
+        if (state != null) replace(ctx, did) { it.withOutcome(Outcome(state, "bluetooth", it.fails, it.probeAt)) }
+        PlugWidget.updateAll(ctx)
+        state != null
+    }
+
+    private val lastBleTry = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     /** Waits for a plug to show up online in the account after setup, then adds it here. */
     suspend fun waitForCloudPlug(ctx: Context, did: String, timeoutMs: Long = 120_000): Boolean = withContext(Dispatchers.IO) {

@@ -16,9 +16,19 @@ import android.os.Build
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 
-/** A plug in setup mode, heard over Bluetooth. */
+private val bleLock = kotlinx.coroutines.sync.Mutex()
+
+/** Last time each plug (by device id) was heard over Bluetooth. */
+private val seenMap = java.util.concurrent.ConcurrentHashMap<String, Pair<FoundPlug, Long>>()
+private val seen = object {
+    operator fun get(did: String) = seenMap[did]
+    operator fun set(did: String, f: FoundPlug) { seenMap[did] = f to System.currentTimeMillis() }
+}
+
+/** A CozyLife plug heard over Bluetooth (in setup mode, or already set up). */
 data class FoundPlug(val device: BluetoothDevice, val advert: SetupProtocol.Advert, val rssi: Int)
 
 class SetupError(msg: String) : Exception(msg)
@@ -68,23 +78,70 @@ class PlugSetup(private val ctx: Context) {
     }
 
     /** Listens for plugs in setup mode for [ms] milliseconds. */
-    suspend fun scan(ms: Long = 12_000, onFound: (List<FoundPlug>) -> Unit = {}): List<FoundPlug> {
+    suspend fun scan(ms: Long = 12_000, stopWhen: (FoundPlug) -> Boolean = { false },
+                     onFound: (List<FoundPlug>) -> Unit = {}): List<FoundPlug> {
         val scanner = adapter?.bluetoothLeScanner ?: throw SetupError("Bluetooth is off.")
         val found = linkedMapOf<String, FoundPlug>()
+        val done = CompletableDeferred<Unit>()
         val cb = object : ScanCallback() {
             override fun onScanResult(type: Int, r: ScanResult) {
                 val raw = r.scanRecord?.bytes ?: return
                 val a = SetupProtocol.parseAdvert(raw) ?: return
                 if (a.netType == "01") return // Bluetooth-only gadgets, not Wi-Fi plugs
+                val f = FoundPlug(r.device, a, r.rssi)
+                seen[a.deviceId] = f
                 synchronized(found) {
-                    found[r.device.address] = FoundPlug(r.device, a, r.rssi)
+                    found[r.device.address] = f
                     onFound(found.values.sortedByDescending { it.rssi })
                 }
+                if (stopWhen(f)) done.complete(Unit)
             }
         }
-        scanner.startScan(null, ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), cb)
-        try { delay(ms) } finally { try { scanner.stopScan(cb) } catch (_: Exception) { } }
+        // CozyLife plugs call themselves "TT" over Bluetooth (BleScanListenerManage).
+        val filters = listOf(android.bluetooth.le.ScanFilter.Builder().setDeviceName("TT").build())
+        scanner.startScan(filters, ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), cb)
+        try { withTimeoutOrNull(ms) { done.await() } } finally { try { scanner.stopScan(cb) } catch (_: Exception) { } }
         return synchronized(found) { found.values.sortedByDescending { it.rssi } }
+    }
+
+    // ---- Switching and reconnecting over Bluetooth, like the CozyLife app ----
+
+    /** Finds a set-up plug nearby by its device id (plugs keep advertising after setup). */
+    suspend fun near(did: String, ms: Long = 8_000): FoundPlug? {
+        seen[did]?.let { if (System.currentTimeMillis() - it.second < 60_000) return it.first }
+        return scan(ms, stopWhen = { it.advert.deviceId == did }).firstOrNull { it.advert.deviceId == did }
+    }
+
+    /**
+     * Switches a plug over Bluetooth. When [reregister] holds token+key, it also sends the
+     * "keep your Wi-Fi, register again" message CozyLife sends on every Bluetooth connection,
+     * which brings a plug that dropped off the cloud back. Returns the new state, or null.
+     */
+    suspend fun bleSet(did: String, on: Boolean?, reregister: Pair<String, String>?): Boolean? = bleLock.withLock {
+        if (!hasPermission() || !bluetoothOn()) return@withLock null
+        val plug = near(did) ?: return@withLock null
+        val v5 = plug.advert.isV5
+        val link = Link(plug)
+        try {
+            link.open()
+            var state: Boolean? = null
+            if (on != null) {
+                link.send(SetupProtocol.setCommand(on, v5))
+                state = link.awaitState(v5, 4_000)
+            }
+            if (state == null) {
+                link.send(SetupProtocol.QUERY)
+                state = link.awaitState(v5, 4_000)
+            }
+            if (reregister != null) {
+                val (token, key) = reregister
+                link.send(SetupProtocol.reconnectCommand(token, key, v5))
+                link.awaitReply(1, 4_000) { }
+            }
+            state
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e
+        } catch (_: Exception) { null
+        } finally { link.close() }
     }
 
     /** Runs the whole setup. [step] reports progress in words. */
@@ -238,6 +295,15 @@ class PlugSetup(private val ctx: Context) {
                 }
                 @Suppress("UNREACHABLE_CODE") null
             }
+
+        /** Waits for a status reply carrying datapoint 1. */
+        suspend fun awaitState(v5: Boolean, ms: Long): Boolean? = withTimeoutOrNull(ms) {
+            while (true) {
+                val r = replies.receive()
+                SetupProtocol.switchState(r, v5)?.let { return@withTimeoutOrNull it }
+            }
+            @Suppress("UNREACHABLE_CODE") null
+        }
 
         fun close() {
             try { gatt?.disconnect() } catch (_: Exception) { }

@@ -125,6 +125,13 @@ class CozyAccount(private val base: String = "https://api-us.doiting.com") {
         return parseStates(http("/api/app/v2/device/states?$q&token=${enc(token)}&platform=android&lang=en", null))
     }
 
+    /** The account's user id (GET /api/app/user/profile, as the CozyLife app does), for older sign-ins that didn't keep it. */
+    fun uid(token: String): String? {
+        val j = JSONObject(http("/api/app/user/profile?token=${enc(token)}&platform=android&lang=en", null))
+        checkRet(j, "profile")
+        return j.optJSONObject("info")?.opt("uid")?.toString()?.ifEmpty { null }
+    }
+
     fun devices(token: String): List<CloudPlug> =
         parseDevices(http("/api/v2/app/device_with_group/list?token=${enc(token)}&platform=android&lang=en", null))
 
