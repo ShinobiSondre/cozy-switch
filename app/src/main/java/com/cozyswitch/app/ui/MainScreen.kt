@@ -70,6 +70,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.cozyswitch.app.BuildConfig
 import com.cozyswitch.app.data.Plug
+import com.cozyswitch.app.data.FoundPlug
+import com.cozyswitch.app.data.PlugSetup
 import com.cozyswitch.app.data.Plugs
 import com.cozyswitch.app.update.Updater
 import kotlinx.coroutines.Dispatchers
@@ -114,6 +116,15 @@ private fun Screen(modifier: Modifier = Modifier) {
     var addingIp by remember { mutableStateOf(false) }
     var signingIn by remember { mutableStateOf(false) }
     var settingUp by remember { mutableStateOf(false) }
+    // Plugs in setup mode heard over Bluetooth, offered like CozyLife's "device to be added".
+    val setup = remember { PlugSetup(ctx) }
+    var waiting by remember { mutableStateOf<List<FoundPlug>>(emptyList()) }
+    var notNow by remember { mutableStateOf(setOf<String>()) }
+    var addList by remember { mutableStateOf<List<FoundPlug>?>(null) }
+    var btAllowed by remember { mutableStateOf(setup.hasPermission()) }
+    val askBt = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { btAllowed = setup.hasPermission() }
     var account by remember { mutableStateOf(Plugs.accountEmail(ctx)) }
     val cloudReady = plugs.any { it.hasCloud }
 
@@ -154,7 +165,17 @@ private fun Screen(modifier: Modifier = Modifier) {
 
     LifecycleResumeEffect(Unit) {
         refresh()
+        btAllowed = setup.hasPermission()
         onPauseOrDispose { }
+    }
+
+    // Listen for plugs waiting to be added while this screen is open (paused during a setup).
+    val listening = account != null && btAllowed && !settingUp && addList == null
+    LifecycleResumeEffect(listening) {
+        val job = if (listening) scope.launch {
+            setup.watch { w -> scope.launch(Dispatchers.Main) { waiting = w } }
+        } else null
+        onPauseOrDispose { job?.cancel() }
     }
 
     Column(modifier.fillMaxSize().padding(horizontal = 16.dp)) {
@@ -186,6 +207,36 @@ private fun Screen(modifier: Modifier = Modifier) {
                     color = Color.White, fontSize = 14.sp)
             }
             Spacer(Modifier.height(10.dp))
+        }
+
+        val toAdd = waiting.filter { it.device.address !in notNow }
+        if (toAdd.isNotEmpty()) {
+            Column(
+                Modifier.fillMaxWidth().padding(bottom = 10.dp).clip(RoundedCornerShape(18.dp))
+                    .background(Color(0xFF203A5C)).padding(16.dp)
+            ) {
+                Text("Found a plug to add: ${toAdd.size}", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                val names = toAdd.joinToString { f ->
+                    plugs.firstOrNull { it.did == f.advert.deviceId }?.name ?: "new plug …${f.advert.deviceId.takeLast(4)}"
+                }
+                Text(names, color = Dim, fontSize = 13.sp)
+                Row(Modifier.padding(top = 8.dp)) {
+                    Button(onClick = { addList = toAdd; waiting = emptyList() }) { Text("Add") }
+                    TextButton(onClick = { notNow = notNow + toAdd.map { it.device.address } }) { Text("Not now") }
+                }
+            }
+        }
+        if (account != null && !btAllowed) {
+            Row(
+                Modifier.fillMaxWidth().padding(bottom = 10.dp).clip(RoundedCornerShape(14.dp)).background(CardBg).padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Let Cozy Switch notice plugs in setup mode (blinking), like the CozyLife app does.",
+                    color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                TextButton(onClick = {
+                    askBt.launch(arrayOf(android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.BLUETOOTH_CONNECT))
+                }) { Text("Allow") }
+            }
         }
 
         message?.let {
@@ -280,6 +331,7 @@ private fun Screen(modifier: Modifier = Modifier) {
     }
 
     if (settingUp) SetupDialog(onClose = { settingUp = false; refresh(force = true) })
+    addList?.let { l -> SetupDialog(waiting = l, onClose = { addList = null; refresh(force = true) }) }
 
     if (signingIn) {
         var email by remember { mutableStateOf("") }

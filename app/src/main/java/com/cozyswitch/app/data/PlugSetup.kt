@@ -23,6 +23,19 @@ data class FoundPlug(val device: BluetoothDevice, val advert: SetupProtocol.Adve
 
 class SetupError(msg: String) : Exception(msg)
 
+/** The Wi-Fi used for the last successful setup, so the next one is a single tap. Stored only on this phone. */
+object SavedWifi {
+    private const val PREFS = "setup_wifi"
+    fun get(ctx: Context): Pair<String, String>? {
+        val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val ssid = p.getString("ssid", null) ?: return null
+        return ssid to (p.getString("pw", "") ?: "")
+    }
+    fun put(ctx: Context, ssid: String, pw: String) =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("ssid", ssid).putString("pw", pw).apply()
+    fun forget(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
+}
+
 /**
  * Puts a CozyLife plug on Wi-Fi over Bluetooth, the way the CozyLife app does: connect, send
  * command 1 (Wi-Fi name and password, the account's plug key and login token), wait for "OK",
@@ -33,6 +46,26 @@ class PlugSetup(private val ctx: Context) {
     private val adapter get() = ctx.getSystemService(BluetoothManager::class.java)?.adapter
 
     fun bluetoothOn() = adapter?.isEnabled == true
+
+    fun hasPermission() = listOf(android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.BLUETOOTH_CONNECT)
+        .all { ctx.checkSelfPermission(it) == android.content.pm.PackageManager.PERMISSION_GRANTED }
+
+    /**
+     * Listens in a loop (20 s on, 10 s off) and reports plugs waiting to be added: in setup mode
+     * and not tied to an account, exactly what makes the CozyLife app pop up "device to be added".
+     * Runs until cancelled.
+     */
+    suspend fun watch(onWaiting: (List<FoundPlug>) -> Unit) {
+        while (true) {
+            if (hasPermission() && bluetoothOn()) {
+                try {
+                    val waiting = scan(20_000).filter { !it.advert.bound }
+                    onWaiting(waiting)
+                } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (_: Exception) { }
+            }
+            delay(10_000)
+        }
+    }
 
     /** Listens for plugs in setup mode for [ms] milliseconds. */
     suspend fun scan(ms: Long = 12_000, onFound: (List<FoundPlug>) -> Unit = {}): List<FoundPlug> {

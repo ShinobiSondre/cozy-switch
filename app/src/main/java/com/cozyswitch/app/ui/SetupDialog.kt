@@ -54,6 +54,7 @@ import androidx.core.content.ContextCompat
 import com.cozyswitch.app.data.FoundPlug
 import com.cozyswitch.app.data.PlugSetup
 import com.cozyswitch.app.data.Plugs
+import com.cozyswitch.app.data.SavedWifi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
@@ -61,15 +62,18 @@ private enum class Stage { Intro, Searching, Pick, Wifi, Working, Done, Failed }
 
 /** Puts a plug in setup mode on Wi-Fi over Bluetooth, like "Add device" in the CozyLife app. */
 @Composable
-fun SetupDialog(onClose: () -> Unit) {
+fun SetupDialog(waiting: List<FoundPlug> = emptyList(), onClose: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val setup = remember { PlugSetup(ctx) }
-    var stage by remember { mutableStateOf(Stage.Intro) }
-    val found = remember { mutableStateListOf<FoundPlug>() }
-    var chosen by remember { mutableStateOf<FoundPlug?>(null) }
-    var ssid by remember { mutableStateOf(currentSsid(ctx)) }
-    var pw by remember { mutableStateOf("") }
+    val saved = remember { SavedWifi.get(ctx) }
+    // Opened from the "plug to add" card: skip the search, like CozyLife's Add button.
+    var stage by remember { mutableStateOf(when { waiting.size == 1 -> Stage.Wifi; waiting.isNotEmpty() -> Stage.Pick; else -> Stage.Intro }) }
+    val found = remember { mutableStateListOf<FoundPlug>().apply { addAll(waiting) } }
+    var chosen by remember { mutableStateOf(waiting.singleOrNull()) }
+    var ssid by remember { mutableStateOf(saved?.first ?: currentSsid(ctx)) }
+    var pw by remember { mutableStateOf(saved?.second ?: "") }
+    var keepWifi by remember { mutableStateOf(true) }
     var showPw by remember { mutableStateOf(false) }
     val log = remember { mutableStateListOf<String>() }
     var error by remember { mutableStateOf<String?>(null) }
@@ -78,6 +82,7 @@ fun SetupDialog(onClose: () -> Unit) {
     val known = remember { Plugs.load(ctx).associate { it.did to it.name } }
 
     DisposableEffect(Unit) { onDispose { job?.cancel() } }
+
 
     fun search() {
         found.clear(); stage = Stage.Searching
@@ -116,6 +121,7 @@ fun SetupDialog(onClose: () -> Unit) {
         job = scope.launch {
             try {
                 setup.setUp(p, ssid.trim(), pw, s) { line -> scope.launch { log += line } }
+                if (keepWifi) SavedWifi.put(ctx, ssid.trim(), pw) else SavedWifi.forget(ctx)
                 stage = Stage.Done
             } catch (e: kotlinx.coroutines.CancellationException) { throw e
             } catch (e: Exception) {
@@ -123,6 +129,11 @@ fun SetupDialog(onClose: () -> Unit) {
                 stage = Stage.Failed
             }
         }
+    }
+
+    // Same Wi-Fi as last time and one plug waiting: go straight to setting it up.
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        if (stage == Stage.Wifi && saved != null && session != null) go()
     }
 
     Dialog(onDismissRequest = { if (stage != Stage.Working) onClose() },
@@ -184,6 +195,12 @@ fun SetupDialog(onClose: () -> Unit) {
                     }
                 }
                 Stage.Wifi -> {
+                    chosen?.let { c ->
+                        Text(known[c.advert.deviceId]?.let { "$it is back in setup mode. It keeps its name and automations." }
+                            ?: "New plug …${c.advert.deviceId.takeLast(4)}", color = Color.White, fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                    }
                     Text("Which Wi-Fi should the plug join?", color = Color.White, fontSize = 14.sp)
                     Spacer(Modifier.height(8.dp))
                     OutlinedTextField(ssid, { ssid = it }, label = { Text("Wi-Fi name") }, singleLine = true,
@@ -194,8 +211,11 @@ fun SetupDialog(onClose: () -> Unit) {
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                         modifier = Modifier.fillMaxWidth())
                     TextButton(onClick = { showPw = !showPw }) { Text(if (showPw) "Hide password" else "Show password") }
-                    Text("The password is only sent to the plug, over Bluetooth. Cozy Switch doesn't keep it.",
-                        color = dim, fontSize = 12.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.material3.Checkbox(keepWifi, { keepWifi = it })
+                        Text("Remember this Wi-Fi for the next plug (stays on this phone only)", color = dim, fontSize = 12.sp)
+                    }
+                    Text("The password is sent to the plug over Bluetooth, nowhere else.", color = dim, fontSize = 12.sp)
                     Spacer(Modifier.height(12.dp))
                     Button(onClick = { go() }, enabled = ssid.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Set up") }
                     TextButton(onClick = { stage = Stage.Pick }) { Text("Back") }
