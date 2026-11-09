@@ -105,9 +105,9 @@ class PlugWidget : AppWidgetProvider() {
             r.setTextViewText(R.id.name, p.name)
             val (label, bg) = when {
                 p.did in busy -> "…" to R.drawable.pill_busy
-                p.on == true -> "ON" to R.drawable.pill_on
-                p.on == false -> "OFF" to R.drawable.pill_off
-                else -> "offline" to R.drawable.pill_busy
+                p.on == true -> (if (p.via == "cloud") "ON ☁" else "ON") to R.drawable.pill_on
+                p.on == false -> (if (p.via == "cloud") "OFF ☁" else "OFF") to R.drawable.pill_off
+                else -> "unplug?" to R.drawable.pill_busy
             }
             r.setTextViewText(R.id.state, label)
             r.setInt(R.id.state, "setBackgroundResource", bg)

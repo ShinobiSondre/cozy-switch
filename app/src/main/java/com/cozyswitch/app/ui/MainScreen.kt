@@ -350,9 +350,17 @@ private fun PlugCard(p: Plug, busy: Boolean, onToggle: (Boolean) -> Unit, onEdit
             Text(p.name, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
             Text(
                 when (p.on) { true -> "On"; false -> "Off"; null -> "Not answering" } +
-                    (if (p.ip.isNotEmpty()) "  ·  ${p.ip}" else "") + (if (p.hasCloud) "  ·  ☁" else ""),
+                    when (p.via) { "wifi" -> "  ·  via Wi-Fi"; "cloud" -> "  ·  via cloud ☁"; else -> "" },
                 color = if (p.on == null) Color(0xFFFFB27A) else Dim, fontSize = 12.sp
             )
+            val hint = when {
+                p.on == null && p.ip.isNotEmpty() || p.on == null && p.hasCloud ->
+                    "Unplug it from the wall for 10 seconds, then plug it back in."
+                p.wifiStuck && p.via == "cloud" ->
+                    "Its Wi-Fi connection is stuck, so the cloud is used. Unplugging it for 10 s fixes that."
+                else -> null
+            }
+            hint?.let { Text(it, color = Color(0xFFFFB27A), fontSize = 12.sp) }
         }
         if (busy) {
             CircularProgressIndicator(Modifier.size(24.dp).padding(end = 4.dp), strokeWidth = 2.dp, color = Accent)

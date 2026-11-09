@@ -28,9 +28,44 @@ data class Plug(
     val key: String = "",
     val relayHost: String = "",
     val relayPort: Int = 0,
+    // How the plug was last reached ("wifi", "cloud" or "" when not at all), and the
+    // count of failed home-Wi-Fi tries. After 3 in a row the plug's own listener is
+    // probably stuck (a known firmware fault), so Wi-Fi is skipped until [probeAt].
+    val via: String = "",
+    val fails: Int = 0,
+    val probeAt: Long = 0,
 ) {
+    /** Its home-Wi-Fi connection has stopped answering; only unplugging it fixes that. */
+    val wifiStuck get() = fails >= STUCK_AFTER
     val hasCloud get() = key.isNotEmpty() && relayHost.isNotEmpty() && relayPort > 0
     fun cloud() = CloudPlug(did, key, name, relayHost, relayPort, null, true)
+}
+
+const val STUCK_AFTER = 3
+const val PROBE_EVERY_MS = 10 * 60 * 1000L
+
+/** What one attempt to reach a plug ended with. */
+internal data class Outcome(val on: Boolean?, val via: String, val fails: Int, val probeAt: Long)
+
+/**
+ * Wi-Fi first, cloud second, skipping a stuck Wi-Fi connection (and checking it again every
+ * 10 minutes, so it's used again once the plug has been unplugged and plugged back in).
+ */
+internal fun reach(
+    p: Plug, home: Boolean, now: Long,
+    local: (String) -> Boolean?,
+    cloud: (CloudPlug) -> Boolean?,
+): Outcome {
+    var fails = p.fails
+    var probeAt = p.probeAt
+    val tryLocal = home && p.ip.isNotEmpty() && (!p.hasCloud || fails < STUCK_AFTER || now >= probeAt)
+    if (tryLocal) {
+        local(p.ip)?.let { return Outcome(it, "wifi", 0, 0) }
+        fails++
+        if (fails >= STUCK_AFTER) probeAt = now + PROBE_EVERY_MS
+    }
+    if (p.hasCloud) cloud(p.cloud())?.let { return Outcome(it, "cloud", fails, probeAt) }
+    return Outcome(null, "", fails, probeAt)
 }
 
 /** The saved plug list, plus everything that talks to the plugs. Used by both the app and the widget. */
@@ -54,6 +89,9 @@ object Plugs {
                     key = o.optString("key"),
                     relayHost = o.optString("relayHost"),
                     relayPort = o.optInt("relayPort", 0),
+                    via = o.optString("via"),
+                    fails = o.optInt("fails", 0),
+                    probeAt = o.optLong("probeAt", 0),
                 )
             }
         } catch (_: Exception) {
@@ -67,6 +105,7 @@ object Plugs {
         list.forEach { p ->
             val o = JSONObject().put("did", p.did).put("name", p.name).put("ip", p.ip).put("pid", p.pid)
             if (p.on != null) o.put("on", p.on)
+            o.put("via", p.via).put("fails", p.fails).put("probeAt", p.probeAt)
             if (p.hasCloud) o.put("key", p.key).put("relayHost", p.relayHost).put("relayPort", p.relayPort)
             a.put(o)
         }
@@ -82,6 +121,8 @@ object Plugs {
 
     private fun replace(ctx: Context, did: String, change: (Plug) -> Plug) =
         edit(ctx) { l -> l.map { if (it.did == did) change(it) else it } }
+
+    private fun Plug.withOutcome(o: Outcome) = copy(on = o.on, via = o.via, fails = o.fails, probeAt = o.probeAt)
 
     fun rename(ctx: Context, did: String, name: String) {
         replace(ctx, did) { it.copy(name = name.trim().ifEmpty { it.name }) }
@@ -195,13 +236,12 @@ object Plugs {
         val states = coroutineScope {
             list.map { p ->
                 async {
-                    var s = if (home && p.ip.isNotEmpty()) c.query(p.ip) else null
-                    if (s == null && p.hasCloud) s = try { relay.query(p.cloud()) } catch (_: CloudError) { null }
-                    p.did to s
+                    p.did to reach(p, home, System.currentTimeMillis(), { c.query(it) },
+                        { try { relay.query(it) } catch (_: CloudError) { null } })
                 }
             }.awaitAll()
         }.toMap()
-        edit(ctx) { l -> l.map { if (states.containsKey(it.did)) it.copy(on = states[it.did]) else it } }
+        edit(ctx) { l -> l.map { p -> states[p.did]?.let { o -> p.withOutcome(o) } ?: p } }
         PlugWidget.updateAll(ctx)
     }
 
@@ -212,20 +252,22 @@ object Plugs {
     suspend fun switch(ctx: Context, did: String, on: Boolean): Boolean? = withContext(Dispatchers.IO) {
         val p = load(ctx).firstOrNull { it.did == did } ?: return@withContext null
         val home = onWifi(ctx)
-        // 1. Straight to the plug over the home Wi-Fi.
-        var result = if (home && p.ip.isNotEmpty()) client(ctx).set(p.ip, on) else null
-        // 2. Through CozyLife's cloud, like the CozyLife app (works from anywhere).
-        if (result == null && p.hasCloud) {
-            lastCloudError = null
-            result = try { CozyRelay().set(p.cloud(), on) } catch (e: CloudError) { lastCloudError = e.message; null }
-        }
+        lastCloudError = null
+        val c = client(ctx)
+        val o = reach(p, home, System.currentTimeMillis(), { c.set(it, on) }, {
+            try { CozyRelay().set(it, on) } catch (e: CloudError) { lastCloudError = e.message; null }
+        })
+        var result = o.on
+        replace(ctx, did) { it.withOutcome(o) }
         // 3. At home without the cloud: the router may have given the plug a new address.
         if (result == null && home && !p.hasCloud) {
             scan(ctx)
             val moved = load(ctx).firstOrNull { it.did == did }
-            if (moved != null && moved.ip != p.ip) result = client(ctx).set(moved.ip, on)
+            if (moved != null && moved.ip != p.ip) {
+                result = client(ctx).set(moved.ip, on)
+                replace(ctx, did) { it.copy(on = result, via = if (result != null) "wifi" else "", fails = if (result != null) 0 else it.fails) }
+            }
         }
-        replace(ctx, did) { it.copy(on = result) }
         PlugWidget.updateAll(ctx)
         result
     }
