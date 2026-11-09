@@ -293,7 +293,7 @@ object Plugs {
                         else -> {
                             // 2. Not in the cloud answer: ask the plug (Wi-Fi, then relay).
                             var o = reach(p, home, System.currentTimeMillis(), { ip -> oneAtATime(p.did) { c.query(ip) } },
-                                { cp -> try { kotlinx.coroutines.runBlocking { LiveLink.send(cp, null) } ?: relay.query(cp) } catch (_: CloudError) { null } })
+                                { cp -> try { relay.query(cp) } catch (_: CloudError) { null } })
                             if (o.on == null && home && !p.hasCloud) {
                                 // 3. It may have a new address: ask the Wi-Fi who's there (quick UDP call).
                                 val ip = Discovery.find(ctx, p.did)
@@ -340,8 +340,10 @@ object Plugs {
         var probeAt = p.probeAt
 
         suspend fun cloudOnce(cp: CloudPlug): Boolean? = try {
-            // The standing link if it's up (no setup delay), otherwise a one-off connection.
-            LiveLink.send(cp, on) ?: CozyRelay().set(cp, on)
+            val relay = CozyRelay()
+            val r = relay.set(cp, on)
+            ConnLog.add(ctx, "${p.name}: cloud reply: ${relay.lastRaw ?: "none"}")
+            r
         } catch (e: CloudError) { lastCloudError = e.message; null }
 
         // 1. Like the CozyLife app: send over Wi-Fi and the cloud at the same time; first answer wins.
@@ -351,20 +353,25 @@ object Plugs {
         run {
             val race = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
             val jobs = mutableListOf<kotlinx.coroutines.Job>()
+            if (!tryLocal) ConnLog.add(ctx, "${p.name}: Wi-Fi skipped (" + when {
+                !home -> "phone not on Wi-Fi"
+                p.ip.isEmpty() -> "no address known"
+                else -> "stuck, next try " + java.text.SimpleDateFormat("HH:mm", java.util.Locale.ROOT).format(java.util.Date(p.probeAt))
+            } + ")")
             if (tryLocal) jobs += race.launch {
-                val r = oneAtATime(did) { c.set(p.ip, on) }
-                ConnLog.add(ctx, "${p.name}: Wi-Fi ${p.ip} → ${r ?: "no answer"} (${System.currentTimeMillis() - start} ms)")
+                val r = oneAtATime(did) { c.set(p.ip, on) }?.takeIf { it == on }
+                ConnLog.add(ctx, "${p.name}: Wi-Fi ${p.ip} → ${r ?: "no answer / didn't switch"} (${System.currentTimeMillis() - start} ms)")
                 if (r == null) { fails++; if (fails >= STUCK_AFTER) probeAt = System.currentTimeMillis() + PROBE_EVERY_MS } else fails = 0
                 winner.send(r?.let { it to "wifi" })
             }
             if (p.hasCloud) jobs += race.launch {
-                var r = cloudOnce(p.cloud())
+                var r = cloudOnce(p.cloud())?.takeIf { it == on }
                 if (r == null) {
                     // The plug may have moved to another relay: fetch the address and try once more.
                     syncCloud(ctx)
                     val fresh = load(ctx).firstOrNull { it.did == did }
                     if (fresh != null && fresh.hasCloud && (fresh.relayHost != p.relayHost || fresh.relayPort != p.relayPort)) {
-                        r = cloudOnce(fresh.cloud())
+                        r = cloudOnce(fresh.cloud())?.takeIf { it == on }
                     }
                 }
                 ConnLog.add(ctx, "${p.name}: cloud ${p.relayHost}:${p.relayPort} → ${r ?: (lastCloudError ?: "no answer")} (${System.currentTimeMillis() - start} ms)")
@@ -384,7 +391,7 @@ object Plugs {
             val ip = Discovery.find(ctx, did)
             if (ip != null && ip != p.ip) {
                 replace(ctx, did) { it.copy(ip = ip) }
-                val r = oneAtATime(did) { c.set(ip, on) }
+                val r = oneAtATime(did) { c.set(ip, on) }?.takeIf { it == on }
                 ConnLog.add(ctx, "${p.name}: moved to $ip → ${r ?: "no answer"}")
                 if (r != null) { won = r to "wifi"; fails = 0 }
             }
@@ -393,8 +400,12 @@ object Plugs {
         if (won == null) {
             lastBleTry[did] = System.currentTimeMillis()
             p = load(ctx).firstOrNull { it.did == did } ?: p
-            val r = PlugSetup(ctx).bleSet(did, on, reregisterFor(ctx, p))
-            ConnLog.add(ctx, "${p.name}: Bluetooth → ${r ?: "not found / no answer"}")
+            val ble = PlugSetup(ctx)
+            val r = if (!ble.hasPermission()) { ConnLog.add(ctx, "${p.name}: Bluetooth skipped (Nearby devices not allowed)"); null }
+            else if (!ble.bluetoothOn()) { ConnLog.add(ctx, "${p.name}: Bluetooth skipped (Bluetooth is off)"); null }
+            else ble.bleSet(did, on, reregisterFor(ctx, p))?.takeIf { it == on }.also {
+                ConnLog.add(ctx, "${p.name}: Bluetooth → ${it ?: "not found / no answer"}")
+            }
             if (r != null) won = r to "bluetooth"
         }
         val o = Outcome(won?.first, won?.second ?: "", fails, probeAt)

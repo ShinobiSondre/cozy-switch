@@ -147,6 +147,7 @@ object LiveLink {
         val raw = f["message"] ?: return
         val msg = try { JSONObject(URLDecoder.decode(raw.replace("+", "%2B"), "UTF-8")) } catch (_: Exception) { return }
         r.pending.remove(msg.optString("sn"))?.complete(msg)
+        appCtx?.let { c -> Plugs.load(c).firstOrNull { it.did == did }?.let { ConnLog.add(c, "${it.name}: plug reported ${msg.toString().take(160)}") } }
         // Any report carrying datapoint 1 is the plug telling us its state: keep the app in step.
         val data = msg.optJSONObject("msg")?.optJSONObject("data")
         if (data != null && data.has("1")) {

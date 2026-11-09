@@ -171,6 +171,8 @@ class CozyAccount(private val base: String = "https://api-us.doiting.com") {
  * We must subscribe to the plug's report topic first, or its answer has nowhere to go.
  */
 class CozyRelay(private val timeoutMs: Int = 6000) {
+    /** The plug's raw reply to the last command (for the connection log), or null. */
+    @Volatile var lastRaw: String? = null
 
     /** Whether the plug is on, or null if it didn't answer. Throws CloudError if the plug is offline. */
     fun query(p: CloudPlug): Boolean? =
@@ -209,8 +211,10 @@ class CozyRelay(private val timeoutMs: Int = 6000) {
                     }
                     if (f["topic"] != "device_${p.did}") continue
                     val raw = f["message"] ?: continue
-                    val reply = try { JSONObject(URLDecoder.decode(raw.replace("+", "%2B"), "UTF-8")) } catch (_: Exception) { continue }
+                    val text = try { URLDecoder.decode(raw.replace("+", "%2B"), "UTF-8") } catch (_: Exception) { continue }
+                    val reply = try { JSONObject(text) } catch (_: Exception) { continue }
                     if (reply.optString("sn") != sn) continue
+                    lastRaw = text.take(200)
                     val data = reply.optJSONObject("msg")?.optJSONObject("data")
                     return@use if (data != null && data.has("1")) data.optInt("1") > 0 else null
                 }
