@@ -36,12 +36,14 @@ class MainActivity : ComponentActivity() {
         Installer.appVisible = true
         Updater.onResume(this)
         com.cozyswitch.app.data.LiveLink.start(this) // standing cloud link while the app is open, like CozyLife
+        com.cozyswitch.app.data.BleHub.start(this)   // and Bluetooth links to every plug in range, like CozyLife
     }
 
     override fun onPause() {
         super.onPause()
         Installer.appVisible = false
         com.cozyswitch.app.data.LiveLink.stopSoon()
+        com.cozyswitch.app.data.BleHub.stopSoon()
         PlugWidget.updateAll(this)
     }
 }

@@ -183,7 +183,12 @@ class PlugSetup(private val ctx: Context) {
     }
 
     /** One Bluetooth connection to a plug, with the waits turned into suspend calls. */
-    private inner class Link(private val plug: FoundPlug) {
+    inner class Link(val plug: FoundPlug) {
+        /** Called for every reply, including ones the plug sends by itself. */
+        @Volatile var listener: ((SetupProtocol.Reply) -> Unit)? = null
+        /** Called when the Bluetooth connection drops. */
+        @Volatile var onDrop: (() -> Unit)? = null
+        @Volatile var isUp = false
         private var gatt: BluetoothGatt? = null
         private var write: BluetoothGattCharacteristic? = null
         private var connected = CompletableDeferred<Boolean>()
@@ -198,7 +203,10 @@ class PlugSetup(private val ctx: Context) {
         private val cb = object : BluetoothGattCallback() {
             override fun onConnectionStateChange(g: BluetoothGatt, status: Int, state: Int) {
                 if (state == BluetoothProfile.STATE_CONNECTED) connected.complete(true)
-                else { connected.complete(false); services.complete(false); written.complete(false); descriptor.complete(false) }
+                else {
+                    connected.complete(false); services.complete(false); written.complete(false); descriptor.complete(false)
+                    if (isUp) { isUp = false; onDrop?.invoke() }
+                }
             }
             override fun onServicesDiscovered(g: BluetoothGatt, status: Int) { services.complete(status == BluetoothGatt.GATT_SUCCESS) }
             override fun onMtuChanged(g: BluetoothGatt, m: Int, status: Int) { mtu.complete(if (status == BluetoothGatt.GATT_SUCCESS) m else 23) }
@@ -211,7 +219,12 @@ class PlugSetup(private val ctx: Context) {
             }
         }
 
-        private fun heard(v: ByteArray) { reassembler.feed(v)?.let { replies.trySend(it) } }
+        private fun heard(v: ByteArray) {
+            reassembler.feed(v)?.let { r -> replies.trySend(r); try { listener?.invoke(r) } catch (_: Exception) { } }
+        }
+
+        /** Throws away replies that arrived earlier, so the next wait only sees fresh ones. */
+        fun drain() { while (replies.tryReceive().isSuccess) { } }
 
         suspend fun open() {
             repeat(2) { attempt ->
@@ -239,6 +252,7 @@ class PlugSetup(private val ctx: Context) {
                             writeDescriptor(d, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
                             withTimeoutOrNull(3_000) { descriptor.await() }
                         }
+                        isUp = true
                         return
                     }
                 }
@@ -306,6 +320,7 @@ class PlugSetup(private val ctx: Context) {
         }
 
         fun close() {
+            isUp = false
             try { gatt?.disconnect() } catch (_: Exception) { }
             try { gatt?.close() } catch (_: Exception) { }
             gatt = null

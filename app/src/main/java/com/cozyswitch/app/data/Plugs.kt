@@ -319,7 +319,7 @@ object Plugs {
 
         // Plugs that dropped off: reconnect them over Bluetooth if they're near, like CozyLife.
         val now2 = System.currentTimeMillis()
-        load(ctx).filter { !it.online && now2 - (lastBleTry[it.did] ?: 0L) > 5 * 60_000 }.take(2).forEach { p ->
+        load(ctx).filter { !it.online && !BleHub.isLinked(it.did) && now2 - (lastBleTry[it.did] ?: 0L) > 5 * 60_000 }.take(2).forEach { p ->
             try { reconnect(ctx, p.did) } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (_: Exception) { }
         }
     }
@@ -358,6 +358,12 @@ object Plugs {
                 p.ip.isEmpty() -> "no address known"
                 else -> "stuck, next try " + java.text.SimpleDateFormat("HH:mm", java.util.Locale.ROOT).format(java.util.Date(p.probeAt))
             } + ")")
+            // Bluetooth, if a standing link is up (CozyLife sends every tap over Bluetooth too).
+            if (BleHub.isLinked(did)) jobs += race.launch {
+                val r = BleHub.send(did, on)?.takeIf { it == on }
+                ConnLog.add(ctx, "${p.name}: Bluetooth link → ${r ?: "no answer / didn't switch"} (${System.currentTimeMillis() - start} ms)")
+                winner.send(r?.let { it to "bluetooth" })
+            }
             if (tryLocal) jobs += race.launch {
                 val r = oneAtATime(did) { c.set(p.ip, on) }?.takeIf { it == on }
                 ConnLog.add(ctx, "${p.name}: Wi-Fi ${p.ip} → ${r ?: "no answer / didn't switch"} (${System.currentTimeMillis() - start} ms)")
@@ -397,7 +403,7 @@ object Plugs {
             }
         }
         // 3. Bluetooth, like the CozyLife app, which also re-registers the plug with the cloud.
-        if (won == null) {
+        if (won == null && !BleHub.isLinked(did)) {
             lastBleTry[did] = System.currentTimeMillis()
             p = load(ctx).firstOrNull { it.did == did } ?: p
             val ble = PlugSetup(ctx)
@@ -415,13 +421,15 @@ object Plugs {
         o.on
     }
 
-    /** A plug reported its state by itself (over the standing cloud link). */
-    fun pushed(ctx: Context, did: String, on: Boolean) {
+    /** A plug reported its state by itself (over the standing cloud or Bluetooth link). */
+    fun pushed(ctx: Context, did: String, on: Boolean, via: String? = null) {
         val p = load(ctx).firstOrNull { it.did == did } ?: return
-        if (p.on == on && p.online) return
-        replace(ctx, did) { it.copy(on = on, online = true, misses = 0, seenAt = System.currentTimeMillis()) }
+        if (p.on == on && p.online && (via == null || p.via == via)) return
+        replace(ctx, did) { it.copy(on = on, online = true, misses = 0, seenAt = System.currentTimeMillis(), via = via ?: it.via) }
         PlugWidget.updateAll(ctx)
     }
+
+    fun tokenOf(ctx: Context): String? = token(ctx)
 
     /** Set when CozyLife refuses the saved sign-in; the screen asks to sign in again. */
     @Volatile var cloudProblem: String? = null
