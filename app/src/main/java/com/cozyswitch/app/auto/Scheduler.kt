@@ -95,7 +95,10 @@ class AutomationReceiver : BroadcastReceiver() {
 
 /** Keeps automations scheduled after a restart, an app update, or a clock change. */
 class RescheduleReceiver : BroadcastReceiver() {
-    override fun onReceive(ctx: Context, intent: Intent) = Scheduler.rescheduleAll(ctx)
+    override fun onReceive(ctx: Context, intent: Intent) {
+        Scheduler.rescheduleAll(ctx)
+        com.cozyswitch.app.data.RefreshWorker.schedule(ctx)
+    }
 }
 
 /** Switches the automation's plugs, retrying a few times if one doesn't answer. */

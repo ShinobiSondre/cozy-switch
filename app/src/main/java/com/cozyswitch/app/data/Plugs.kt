@@ -17,7 +17,10 @@ import org.json.JSONObject
 import java.net.Inet4Address
 import javax.net.SocketFactory
 
-/** One plug. [on] is null when the plug didn't answer last time. */
+/**
+ * One plug. [on] is the last known state (null only if never known); [online] says whether
+ * it answered recently. A single missed answer doesn't wipe the state: CozyLife doesn't either.
+ */
 data class Plug(
     val did: String,
     val name: String,
@@ -34,6 +37,9 @@ data class Plug(
     val via: String = "",
     val fails: Int = 0,
     val probeAt: Long = 0,
+    val online: Boolean = true,
+    val misses: Int = 0,
+    val seenAt: Long = 0,
 ) {
     /** Its home-Wi-Fi connection has stopped answering; only unplugging it fixes that. */
     val wifiStuck get() = fails >= STUCK_AFTER
@@ -92,6 +98,9 @@ object Plugs {
                     via = o.optString("via"),
                     fails = o.optInt("fails", 0),
                     probeAt = o.optLong("probeAt", 0),
+                    online = o.optBoolean("online", true),
+                    misses = o.optInt("misses", 0),
+                    seenAt = o.optLong("seenAt", 0),
                 )
             }
         } catch (_: Exception) {
@@ -106,6 +115,7 @@ object Plugs {
             val o = JSONObject().put("did", p.did).put("name", p.name).put("ip", p.ip).put("pid", p.pid)
             if (p.on != null) o.put("on", p.on)
             o.put("via", p.via).put("fails", p.fails).put("probeAt", p.probeAt)
+                .put("online", p.online).put("misses", p.misses).put("seenAt", p.seenAt)
             if (p.hasCloud) o.put("key", p.key).put("relayHost", p.relayHost).put("relayPort", p.relayPort)
             a.put(o)
         }
@@ -122,7 +132,16 @@ object Plugs {
     private fun replace(ctx: Context, did: String, change: (Plug) -> Plug) =
         edit(ctx) { l -> l.map { if (it.did == did) change(it) else it } }
 
-    private fun Plug.withOutcome(o: Outcome) = copy(on = o.on, via = o.via, fails = o.fails, probeAt = o.probeAt)
+    /** Folds an answer (or a miss) into a plug. Two misses in a row before calling it offline. */
+    private fun Plug.withOutcome(o: Outcome, offlineNow: Boolean = false): Plug =
+        if (o.on != null) copy(on = o.on, via = o.via, fails = o.fails, probeAt = o.probeAt,
+            online = true, misses = 0, seenAt = System.currentTimeMillis())
+        else copy(fails = o.fails, probeAt = o.probeAt, misses = misses + 1,
+            online = !offlineNow && misses + 1 < 2)
+
+    /** One connection at a time per plug: they queue or drop a second one (seen on real plugs). */
+    private val locks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+    private fun <T> oneAtATime(did: String, block: () -> T): T = synchronized(locks.getOrPut(did) { Any() }) { block() }
 
     fun rename(ctx: Context, did: String, name: String) {
         replace(ctx, did) { it.copy(name = name.trim().ifEmpty { it.name }) }
@@ -185,8 +204,9 @@ object Plugs {
      * their address updated if the router gave them a new one.
      */
     suspend fun scan(ctx: Context, progress: (Float) -> Unit = {}): ScanResult = withContext(Dispatchers.IO) {
-        val hosts = subnetHosts(ctx)
-        if (hosts.isEmpty()) return@withContext ScanResult(0, 0)
+        val udp = Discovery.all(ctx)
+        val hosts = subnetHosts(ctx).filterNot { h -> udp.any { it.second == h } }
+        if (hosts.isEmpty() && udp.isEmpty()) return@withContext ScanResult(0, 0)
         val quick = client(ctx, connectMs = 700)
         val c = client(ctx)
         val gate = Semaphore(48)
@@ -201,19 +221,19 @@ object Plugs {
                     }
                 }
             }.awaitAll().filterNotNull()
-        }
+        } + udp.map { (did, ip) -> ip to PlugInfo(did, "", "") }
         var added = 0
         edit(ctx) { old ->
             val l = old.toMutableList()
             for ((ip, info) in found) {
                 val i = l.indexOfFirst { it.did == info.did }
-                if (i >= 0) l[i] = l[i].copy(ip = ip, pid = info.pid)
+                if (i >= 0) l[i] = l[i].copy(ip = ip, pid = info.pid.ifEmpty { l[i].pid })
                 else { added++; l += Plug(info.did, "Plug ${l.size + 1}", ip, info.pid) }
             }
             l
         }
-        refresh(ctx)
-        ScanResult(found.size, added)
+        refresh(ctx, force = true)
+        ScanResult(found.distinctBy { it.second.did }.size, added)
     }
 
     /** Adds a plug by its address. Returns false if nothing answered there. */
@@ -223,26 +243,66 @@ object Plugs {
             if (l.any { it.did == info.did }) l.map { if (it.did == info.did) it.copy(ip = ip.trim()) else it }
             else l + Plug(info.did, "Plug ${l.size + 1}", ip.trim(), info.pid)
         }
-        refresh(ctx)
+        refresh(ctx, force = true)
         true
     }
 
-    /** Asks every plug whether it's on. */
-    suspend fun refresh(ctx: Context) = withContext(Dispatchers.IO) {
+    @Volatile private var lastRefresh = 0L
+
+    /**
+     * Updates every plug's state. Like the CozyLife app, it reads from CozyLife's cloud when signed
+     * in (one request, and the plugs aren't disturbed); plugs are only asked directly when the
+     * cloud doesn't know them. Skipped if it ran in the last 20 seconds, unless [force].
+     */
+    suspend fun refresh(ctx: Context, force: Boolean = false) = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastRefresh < 20_000) { PlugWidget.updateAll(ctx); return@withContext }
+        lastRefresh = now
+        if (load(ctx).isEmpty()) { PlugWidget.updateAll(ctx); return@withContext }
+
+        // 1. The cloud: fresh relay addresses + online flags, then on/off for all plugs at once.
+        val token = token(ctx)
+        val cloudOnline = mutableMapOf<String, Boolean>()
+        var cloudStates: Map<String, Boolean?> = emptyMap()
+        if (token != null) {
+            try {
+                val devices = CozyAccount().devices(token)
+                applyCloud(ctx, devices)
+                devices.forEach { cloudOnline[it.did] = it.online }
+                cloudStates = CozyAccount().states(token, devices.filter { it.online }.map { it.did })
+            } catch (_: Exception) { }
+        }
+
         val list = load(ctx)
-        if (list.isEmpty()) { PlugWidget.updateAll(ctx); return@withContext }
-        val c = client(ctx)
         val home = onWifi(ctx)
+        val c = client(ctx)
         val relay = CozyRelay()
-        val states = coroutineScope {
+        val results = coroutineScope {
             list.map { p ->
                 async {
-                    p.did to reach(p, home, System.currentTimeMillis(), { c.query(it) },
-                        { try { relay.query(it) } catch (_: CloudError) { null } })
+                    val fromCloud = cloudStates[p.did]
+                    when {
+                        fromCloud != null -> p.did to (Outcome(fromCloud, if (p.via == "wifi") "wifi" else "cloud", p.fails, p.probeAt) to false)
+                        cloudOnline[p.did] == false -> p.did to (Outcome(null, "", p.fails, p.probeAt) to true)
+                        else -> {
+                            // 2. Not in the cloud answer: ask the plug (Wi-Fi, then relay).
+                            var o = reach(p, home, System.currentTimeMillis(), { ip -> oneAtATime(p.did) { c.query(ip) } },
+                                { cp -> try { relay.query(cp) } catch (_: CloudError) { null } })
+                            if (o.on == null && home && !p.hasCloud) {
+                                // 3. It may have a new address: ask the Wi-Fi who's there (quick UDP call).
+                                val ip = Discovery.find(ctx, p.did)
+                                if (ip != null && ip != p.ip) {
+                                    replace(ctx, p.did) { it.copy(ip = ip) }
+                                    oneAtATime(p.did) { c.query(ip) }?.let { o = Outcome(it, "wifi", 0, 0) }
+                                }
+                            }
+                            p.did to (o to false)
+                        }
+                    }
                 }
             }.awaitAll()
         }.toMap()
-        edit(ctx) { l -> l.map { p -> states[p.did]?.let { o -> p.withOutcome(o) } ?: p } }
+        edit(ctx) { l -> l.map { p -> results[p.did]?.let { (o, off) -> p.withOutcome(o, off) } ?: p } }
         PlugWidget.updateAll(ctx)
     }
 
@@ -251,26 +311,32 @@ object Plugs {
      * Wi-Fi once (the router may have moved it) and tries again.
      */
     suspend fun switch(ctx: Context, did: String, on: Boolean): Boolean? = withContext(Dispatchers.IO) {
-        val p = load(ctx).firstOrNull { it.did == did } ?: return@withContext null
+        var p = load(ctx).firstOrNull { it.did == did } ?: return@withContext null
         val home = onWifi(ctx)
         lastCloudError = null
         val c = client(ctx)
-        val o = reach(p, home, System.currentTimeMillis(), { c.set(it, on) }, {
-            try { CozyRelay().set(it, on) } catch (e: CloudError) { lastCloudError = e.message; null }
-        })
-        var result = o.on
-        replace(ctx, did) { it.withOutcome(o) }
-        // 3. At home without the cloud: the router may have given the plug a new address.
-        if (result == null && home && !p.hasCloud) {
-            scan(ctx)
-            val moved = load(ctx).firstOrNull { it.did == did }
-            if (moved != null && moved.ip != p.ip) {
-                result = client(ctx).set(moved.ip, on)
-                replace(ctx, did) { it.copy(on = result, via = if (result != null) "wifi" else "", fails = if (result != null) 0 else it.fails) }
+        val cloudSet: (CloudPlug) -> Boolean? = { cp ->
+            try { CozyRelay().set(cp, on) } catch (e: CloudError) { lastCloudError = e.message; null }
+        }
+        // 1. Wi-Fi first (unless that path is known to be stuck), then the cloud relay.
+        var o = reach(p, home, System.currentTimeMillis(), { ip -> oneAtATime(did) { c.set(ip, on) } }, cloudSet)
+        // 2. At home: the router may have moved the plug. A quick UDP call finds it.
+        if (o.on == null && home && p.ip.isNotEmpty()) {
+            val ip = Discovery.find(ctx, did)
+            if (ip != null && ip != p.ip) {
+                replace(ctx, did) { it.copy(ip = ip) }
+                oneAtATime(did) { c.set(ip, on) }?.let { o = Outcome(it, "wifi", 0, 0) }
             }
         }
+        // 3. The cloud may have moved the plug to another relay: fetch the address again and retry.
+        if (o.on == null && token(ctx) != null) {
+            syncCloud(ctx)
+            p = load(ctx).firstOrNull { it.did == did } ?: p
+            if (p.hasCloud) cloudSet(p.cloud())?.let { o = Outcome(it, "cloud", o.fails, o.probeAt) }
+        }
+        replace(ctx, did) { it.withOutcome(o) }
         PlugWidget.updateAll(ctx)
-        result
+        o.on
     }
 
     /** Why the last cloud switch failed, in words, if it did. */
@@ -279,6 +345,9 @@ object Plugs {
     // ---- CozyLife account (away mode) ----
 
     private const val ACCOUNT = "account"
+
+    private fun token(ctx: Context): String? =
+        ctx.getSharedPreferences(ACCOUNT, Context.MODE_PRIVATE).getString("token", null)
 
     fun accountEmail(ctx: Context): String? =
         ctx.getSharedPreferences(ACCOUNT, Context.MODE_PRIVATE).getString("email", null)
@@ -290,11 +359,12 @@ object Plugs {
      */
     suspend fun signIn(ctx: Context, email: String, password: String): Int = withContext(Dispatchers.IO) {
         val acc = CozyAccount()
-        val token = acc.login(email, password)
+        val session = acc.login(email, password)
+        val token = session.token
         ctx.getSharedPreferences(ACCOUNT, Context.MODE_PRIVATE).edit()
-            .putString("email", email.trim()).putString("token", token).apply()
+            .putString("email", email.trim()).putString("token", token).putString("uid", session.uid).apply()
         val n = applyCloud(ctx, acc.devices(token))
-        refresh(ctx)
+        refresh(ctx, force = true)
         n
     }
 
@@ -303,6 +373,31 @@ object Plugs {
         val token = ctx.getSharedPreferences(ACCOUNT, Context.MODE_PRIVATE).getString("token", null)
             ?: return@withContext
         try { applyCloud(ctx, CozyAccount().devices(token)) } catch (_: Exception) { }
+    }
+
+    /** Token and user id, needed to set up a plug; null if not signed in (or signed in before setup existed). */
+    fun session(ctx: Context): CozyAccount.Session? {
+        val p = ctx.getSharedPreferences(ACCOUNT, Context.MODE_PRIVATE)
+        val t = p.getString("token", null) ?: return null
+        val u = p.getString("uid", null)?.ifEmpty { null } ?: return null
+        return CozyAccount.Session(t, u)
+    }
+
+    /** Waits for a plug to show up online in the account after setup, then adds it here. */
+    suspend fun waitForCloudPlug(ctx: Context, did: String, timeoutMs: Long = 120_000): Boolean = withContext(Dispatchers.IO) {
+        val s = session(ctx) ?: return@withContext false
+        val end = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < end) {
+            val found = try { CozyAccount().devices(s.token).firstOrNull { it.did == did } } catch (_: Exception) { null }
+            if (found != null && found.online) {
+                applyCloud(ctx, listOf(found))
+                if (onWifi(ctx)) Discovery.find(ctx, did)?.let { ip -> replace(ctx, did) { it.copy(ip = ip) } }
+                refresh(ctx, force = true)
+                return@withContext true
+            }
+            kotlinx.coroutines.delay(4000)
+        }
+        false
     }
 
     fun signOut(ctx: Context) {

@@ -60,6 +60,23 @@ class CozyAccount(private val base: String = "https://api-us.doiting.com") {
             return out
         }
 
+        fun parseStates(body: String): Map<String, Boolean?> {
+            val j = JSONObject(body)
+            checkRet(j, "status")
+            val info = j.optJSONArray("info") ?: return emptyMap()
+            val out = mutableMapOf<String, Boolean?>()
+            for (i in 0 until info.length()) {
+                val d = info.optJSONObject(i) ?: continue
+                val did = d.optString("device_id")
+                if (did.isEmpty()) continue
+                val st = d.optJSONObject("state") ?: continue
+                val online = st.opt("online").let { it == null || it == true || it.toString() == "1" || it.toString() == "true" }
+                val v = st.opt("1")?.toString()?.toIntOrNull()
+                if (online && v != null) out[did] = v > 0
+            }
+            return out
+        }
+
         fun checkRet(j: JSONObject, what: String) {
             when (j.optString("ret")) {
                 "1" -> return
@@ -72,8 +89,10 @@ class CozyAccount(private val base: String = "https://api-us.doiting.com") {
         private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
     }
 
-    /** Returns a session token. The password is only sent here, never stored. */
-    fun login(email: String, password: String): String {
+    data class Session(val token: String, val uid: String)
+
+    /** Returns a session token and the user id. The password is only sent here, never stored. */
+    fun login(email: String, password: String): Session {
         val form = linkedMapOf(
             "mail" to email.trim(),
             "passwd" to password,
@@ -90,8 +109,20 @@ class CozyAccount(private val base: String = "https://api-us.doiting.com") {
         ).entries.joinToString("&") { "${it.key}=${enc(it.value)}" }
         val j = JSONObject(http("/api/app/user/login", form))
         checkRet(j, "sign-in")
-        return j.optJSONObject("info")?.optString("token")?.ifEmpty { null }
+        val info = j.optJSONObject("info")
+        val token = info?.optString("token")?.ifEmpty { null }
             ?: throw CloudError("CozyLife signed you in but sent no session.")
+        return Session(token, info!!.optString("uid"))
+    }
+
+    /**
+     * On/off for many plugs in one request, from CozyLife's cloud (what the CozyLife app shows).
+     * Plugs the cloud has no fresh state for are left out.
+     */
+    fun states(token: String, dids: List<String>): Map<String, Boolean?> {
+        if (dids.isEmpty()) return emptyMap()
+        val q = dids.joinToString("&") { "device_ids%5B%5D=${enc(it)}" }
+        return parseStates(http("/api/app/v2/device/states?$q&token=${enc(token)}&platform=android&lang=en", null))
     }
 
     fun devices(token: String): List<CloudPlug> =
@@ -140,7 +171,7 @@ class CozyRelay(private val timeoutMs: Int = 6000) {
 
     fun set(p: CloudPlug, on: Boolean): Boolean? = exchange(
         p, CozyClient.CMD_SET,
-        JSONObject().put("attr", JSONArray().put(1)).put("data", JSONObject().put("1", if (on) 1 else 0))
+        JSONObject().put("attr", JSONArray().put(1)).put("data", JSONObject().put("1", if (on) 255 else 0))
     )
 
     private fun line(p: CloudPlug, vararg fields: Pair<String, String>): ByteArray {

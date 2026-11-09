@@ -98,7 +98,7 @@ class CozyClientTest {
         assertEquals(3, m.getInt("cmd"))
         assertEquals(0, m.getInt("pv"))
         assertEquals(1, m.getJSONObject("msg").getJSONArray("attr").getInt(0))
-        assertEquals(1, m.getJSONObject("msg").getJSONObject("data").getInt("1"))
+        assertEquals(255, m.getJSONObject("msg").getJSONObject("data").getInt("1"))
     }
 
     @Test fun ignoresUnrequestedStatusMessages() {

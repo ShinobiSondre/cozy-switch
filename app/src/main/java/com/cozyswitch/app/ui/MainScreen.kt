@@ -125,13 +125,12 @@ private fun Screen(modifier: Modifier = Modifier) {
         onDispose { Plugs.listeners -= l }
     }
 
-    fun refresh() {
+    fun refresh(force: Boolean = false) {
         if (refreshing) return
         refreshing = true
         scope.launch {
             onWifi = Plugs.onWifi(ctx)
-            Plugs.syncCloud(ctx) // relay addresses can change
-            Plugs.refresh(ctx)
+            Plugs.refresh(ctx, force)
             refreshing = false
         }
     }
@@ -163,7 +162,7 @@ private fun Screen(modifier: Modifier = Modifier) {
                 Text("Cozy Switch", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
                 Text("v${BuildConfig.VERSION_NAME}", color = Dim, fontSize = 12.sp)
             }
-            IconButton(onClick = { refresh() }, enabled = !refreshing) {
+            IconButton(onClick = { refresh(force = true) }, enabled = !refreshing) {
                 if (refreshing) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = Accent)
                 else Icon(Icons.Filled.Refresh, "Refresh", tint = Color.White)
             }
@@ -355,7 +354,7 @@ private fun PlugCard(p: Plug, busy: Boolean, onToggle: (Boolean) -> Unit, onEdit
     val on = p.on == true
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(CardBg)
-            .clickable(enabled = !busy && (p.on != null || p.hasCloud)) { onToggle(!on) }
+            .clickable(enabled = !busy) { onToggle(!on) }
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -370,13 +369,12 @@ private fun PlugCard(p: Plug, busy: Boolean, onToggle: (Boolean) -> Unit, onEdit
         Column(Modifier.weight(1f).clickable { onEdit() }) {
             Text(p.name, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                when (p.on) { true -> "On"; false -> "Off"; null -> "Not answering" } +
+                (if (!p.online) "Offline" else when (p.on) { true -> "On"; false -> "Off"; null -> "Checking…" }) +
                     when (p.via) { "wifi" -> "  ·  via Wi-Fi"; "cloud" -> "  ·  via cloud ☁"; else -> "" },
-                color = if (p.on == null) Color(0xFFFFB27A) else Dim, fontSize = 12.sp
+                color = if (!p.online) Color(0xFFFFB27A) else Dim, fontSize = 12.sp
             )
             val hint = when {
-                p.on == null && p.ip.isNotEmpty() || p.on == null && p.hasCloud ->
-                    "Unplug it from the wall for 10 seconds, then plug it back in."
+                !p.online -> "Not answering. If it stays like this, unplug it for 10 seconds and plug it back in."
                 p.wifiStuck && p.via == "cloud" ->
                     "Its Wi-Fi connection is stuck, so the cloud is used. Unplugging it for 10 s fixes that."
                 else -> null

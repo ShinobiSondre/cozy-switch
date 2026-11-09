@@ -19,7 +19,7 @@ data class PlugInfo(val did: String, val pid: String, val mac: String)
  *
  *   info:  {"pv":0,"cmd":0,"sn":"…","msg":{}}
  *   query: {"pv":0,"cmd":2,"sn":"…","msg":{"attr":[0]}}
- *   set:   {"pv":0,"cmd":3,"sn":"…","msg":{"attr":[1],"data":{"1":1}}}   (1 = on, 0 = off)
+ *   set:   {"pv":0,"cmd":3,"sn":"…","msg":{"attr":[1],"data":{"1":255}}} (255 = on like the CozyLife app, 0 = off)
  *
  * The plug answers with the same "sn", and may also send unrequested status messages (cmd 10).
  * Same protocol as the Home Assistant CozyLife integration; no cloud account is involved.
@@ -136,7 +136,7 @@ class CozyClient(
     fun set(ip: String, on: Boolean): Boolean? = withPlug(ip) { s, r ->
         val msg = JSONObject()
             .put("attr", JSONArray().put(1))
-            .put("data", JSONObject().put("1", if (on) 1 else 0))
+            .put("data", JSONObject().put("1", if (on) 255 else 0))
         // Most plugs echo the change back; if one doesn't, ask it directly.
         stateOf(request(s, r, CMD_SET, msg))
             ?: stateOf(request(s, r, CMD_QUERY, JSONObject().put("attr", JSONArray().put(0))))

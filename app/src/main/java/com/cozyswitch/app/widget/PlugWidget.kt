@@ -11,18 +11,16 @@ import com.cozyswitch.app.MainActivity
 import com.cozyswitch.app.R
 import com.cozyswitch.app.data.Plug
 import com.cozyswitch.app.data.Plugs
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
+import com.cozyswitch.app.data.RefreshWorker
+import com.cozyswitch.app.data.SwitchWorker
 
 /** Home-screen widget: one row per plug, tap a row to switch it. */
 class PlugWidget : AppWidgetProvider() {
 
     override fun onUpdate(ctx: Context, mgr: AppWidgetManager, ids: IntArray) {
         draw(ctx)
-        background { Plugs.refresh(ctx) }
+        RefreshWorker.schedule(ctx)
+        RefreshWorker.now(ctx, force = false)
     }
 
     override fun onReceive(ctx: Context, intent: Intent) {
@@ -33,26 +31,14 @@ class PlugWidget : AppWidgetProvider() {
                 val want = plug.on != true
                 busy += did
                 draw(ctx) // show "…" right away
-                background {
-                    try { Plugs.switch(ctx, did, want) } finally { busy -= did; draw(ctx) }
-                }
+                SwitchWorker.start(ctx, did, want)
             }
             ACTION_REFRESH -> {
                 refreshing = true
                 draw(ctx)
-                background {
-                    try { Plugs.refresh(ctx) } finally { refreshing = false; draw(ctx) }
-                }
+                RefreshWorker.now(ctx, force = true)
             }
             else -> super.onReceive(ctx, intent)
-        }
-    }
-
-    /** Runs network work after the tap; Android gives a receiver about 10 seconds. */
-    private fun background(work: suspend () -> Unit) {
-        val pending = goAsync()
-        scope.launch {
-            try { withTimeoutOrNull(9_000) { work() } } finally { pending.finish() }
         }
     }
 
@@ -61,11 +47,15 @@ class PlugWidget : AppWidgetProvider() {
         const val ACTION_REFRESH = "com.cozyswitch.app.REFRESH"
         const val EXTRA_DID = "did"
 
-        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val busy = java.util.Collections.synchronizedSet(mutableSetOf<String>())
         @Volatile private var refreshing = false
 
         fun updateAll(ctx: Context) = draw(ctx)
+
+        /** Called when a switch from the widget has finished. */
+        fun done(ctx: Context, did: String) { busy -= did; draw(ctx) }
+
+        fun refreshed(ctx: Context) { refreshing = false; draw(ctx) }
 
         private fun draw(ctx: Context) {
             val app = ctx.applicationContext
@@ -105,9 +95,10 @@ class PlugWidget : AppWidgetProvider() {
             r.setTextViewText(R.id.name, p.name)
             val (label, bg) = when {
                 p.did in busy -> "…" to R.drawable.pill_busy
+                !p.online -> "offline" to R.drawable.pill_busy
                 p.on == true -> (if (p.via == "cloud") "ON ☁" else "ON") to R.drawable.pill_on
                 p.on == false -> (if (p.via == "cloud") "OFF ☁" else "OFF") to R.drawable.pill_off
-                else -> "unplug?" to R.drawable.pill_busy
+                else -> "?" to R.drawable.pill_busy
             }
             r.setTextViewText(R.id.state, label)
             r.setInt(R.id.state, "setBackgroundResource", bg)
