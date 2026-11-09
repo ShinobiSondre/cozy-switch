@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Cozy Switch</string>
+    <string name="widget_name">Cozy Switch plugs</string>
+    <string name="widget_desc">Tap a plug to turn it on or off</string>
+    <string name="widget_empty">No plugs yet. Tap to open Cozy Switch and find them.</string>
+</resources>
