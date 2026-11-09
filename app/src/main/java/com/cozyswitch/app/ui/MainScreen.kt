@@ -54,6 +54,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
@@ -90,6 +91,9 @@ private fun Screen() {
     var onWifi by remember { mutableStateOf(Plugs.onWifi(ctx)) }
     var editing by remember { mutableStateOf<Plug?>(null) }
     var addingIp by remember { mutableStateOf(false) }
+    var signingIn by remember { mutableStateOf(false) }
+    var account by remember { mutableStateOf(Plugs.accountEmail(ctx)) }
+    val cloudReady = plugs.any { it.hasCloud }
 
     // Redraw when the widget (or anything else) changes the saved list.
     DisposableEffect(Unit) {
@@ -105,6 +109,7 @@ private fun Screen() {
         refreshing = true
         scope.launch {
             onWifi = Plugs.onWifi(ctx)
+            Plugs.syncCloud(ctx) // relay addresses can change
             Plugs.refresh(ctx)
             refreshing = false
         }
@@ -146,14 +151,17 @@ private fun Screen() {
             }) { Icon(Icons.Filled.SystemUpdate, "Check for update", tint = Color.White) }
         }
 
-        if (!onWifi) {
+        if (!onWifi && cloudReady) {
+            Text("Away from home: switching through CozyLife's cloud.", color = Dim, fontSize = 13.sp,
+                modifier = Modifier.padding(bottom = 8.dp))
+        } else if (!onWifi) {
             Row(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF3A2A12)).padding(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(Icons.Filled.WifiOff, null, tint = Accent)
                 Spacer(Modifier.width(10.dp))
-                Text("You're not on Wi-Fi. The plugs can only be switched from your home Wi-Fi.",
+                Text("You're not on Wi-Fi. Sign in to CozyLife below to switch plugs from anywhere.",
                     color = Color.White, fontSize = 14.sp)
             }
             Spacer(Modifier.height(10.dp))
@@ -190,11 +198,28 @@ private fun Screen() {
                         scope.launch {
                             val r = Plugs.switch(ctx, p.did, want)
                             busy -= p.did
-                            if (r == null) message = "${p.name} didn't answer. Is it plugged in and on the Wi-Fi?"
+                            if (r == null) message = Plugs.lastCloudError?.let { "${p.name}: $it" }
+                                ?: "${p.name} didn't answer. Is it plugged in and on the Wi-Fi?"
                         }
                     },
                     onEdit = { editing = p }
                 )
+            }
+            item {
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(CardBg).padding(16.dp)) {
+                    Text("Away from home", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(4.dp))
+                    if (account != null) {
+                        Text("Signed in to CozyLife as $account. When the plugs can't be reached on Wi-Fi, " +
+                            "Cozy Switch goes through CozyLife's cloud, like the CozyLife app.", color = Dim, fontSize = 13.sp)
+                        TextButton(onClick = { Plugs.signOut(ctx); account = null }) { Text("Sign out") }
+                    } else {
+                        Text("Sign in with your CozyLife account to switch plugs from anywhere. " +
+                            "Your password is only used to sign in and isn't saved.", color = Dim, fontSize = 13.sp)
+                        Spacer(Modifier.height(8.dp))
+                        Button(onClick = { signingIn = true }) { Text("Sign in to CozyLife") }
+                    }
+                }
             }
             item {
                 Text(
@@ -227,6 +252,48 @@ private fun Screen() {
             onSave = { name -> Plugs.rename(ctx, p.did, name); editing = null },
             onMove = { by -> Plugs.move(ctx, p.did, by) },
             onRemove = { Plugs.remove(ctx, p.did); editing = null },
+        )
+    }
+
+    if (signingIn) {
+        var email by remember { mutableStateOf("") }
+        var pw by remember { mutableStateOf("") }
+        var working by remember { mutableStateOf(false) }
+        var err by remember { mutableStateOf<String?>(null) }
+        AlertDialog(
+            onDismissRequest = { if (!working) signingIn = false },
+            title = { Text("Sign in to CozyLife") },
+            text = {
+                Column {
+                    Text("Use the same email and password as in the CozyLife app.", fontSize = 13.sp, color = Dim)
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(email, { email = it }, label = { Text("Email") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email))
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedTextField(pw, { pw = it }, label = { Text("Password") }, singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
+                    err?.let { Text(it, color = Color(0xFFFF8A80), fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp)) }
+                }
+            },
+            confirmButton = {
+                Button(enabled = !working && email.isNotBlank() && pw.isNotEmpty(), onClick = {
+                    working = true; err = null
+                    scope.launch {
+                        try {
+                            val n = Plugs.signIn(ctx, email, pw)
+                            account = Plugs.accountEmail(ctx)
+                            signingIn = false
+                            message = if (n == 0) "Signed in, but the account has no plugs."
+                                else "Signed in. $n plug${if (n == 1) "" else "s"} can now be switched from anywhere."
+                        } catch (e: Exception) {
+                            err = e.message ?: "Sign-in failed."
+                        }
+                        working = false
+                    }
+                }) { Text(if (working) "Signing in…" else "Sign in") }
+            },
+            dismissButton = { TextButton(enabled = !working, onClick = { signingIn = false }) { Text("Cancel") } }
         )
     }
 
@@ -267,7 +334,7 @@ private fun PlugCard(p: Plug, busy: Boolean, onToggle: (Boolean) -> Unit, onEdit
     val on = p.on == true
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(CardBg)
-            .clickable(enabled = !busy && p.on != null) { onToggle(!on) }
+            .clickable(enabled = !busy && (p.on != null || p.hasCloud)) { onToggle(!on) }
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -282,7 +349,8 @@ private fun PlugCard(p: Plug, busy: Boolean, onToggle: (Boolean) -> Unit, onEdit
         Column(Modifier.weight(1f).clickable { onEdit() }) {
             Text(p.name, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                when (p.on) { true -> "On"; false -> "Off"; null -> "Not answering" } + "  ·  ${p.ip}",
+                when (p.on) { true -> "On"; false -> "Off"; null -> "Not answering" } +
+                    (if (p.ip.isNotEmpty()) "  ·  ${p.ip}" else "") + (if (p.hasCloud) "  ·  ☁" else ""),
                 color = if (p.on == null) Color(0xFFFFB27A) else Dim, fontSize = 12.sp
             )
         }

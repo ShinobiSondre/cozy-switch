@@ -24,7 +24,14 @@ data class Plug(
     val ip: String,
     val pid: String = "",
     val on: Boolean? = null,
-)
+    // From the CozyLife account, for switching away from home. Empty when not signed in.
+    val key: String = "",
+    val relayHost: String = "",
+    val relayPort: Int = 0,
+) {
+    val hasCloud get() = key.isNotEmpty() && relayHost.isNotEmpty() && relayPort > 0
+    fun cloud() = CloudPlug(did, key, name, relayHost, relayPort, null, true)
+}
 
 /** The saved plug list, plus everything that talks to the plugs. Used by both the app and the widget. */
 object Plugs {
@@ -44,6 +51,9 @@ object Plugs {
                     ip = o.optString("ip"),
                     pid = o.optString("pid"),
                     on = if (o.has("on")) o.optBoolean("on") else null,
+                    key = o.optString("key"),
+                    relayHost = o.optString("relayHost"),
+                    relayPort = o.optInt("relayPort", 0),
                 )
             }
         } catch (_: Exception) {
@@ -57,6 +67,7 @@ object Plugs {
         list.forEach { p ->
             val o = JSONObject().put("did", p.did).put("name", p.name).put("ip", p.ip).put("pid", p.pid)
             if (p.on != null) o.put("on", p.on)
+            if (p.hasCloud) o.put("key", p.key).put("relayHost", p.relayHost).put("relayPort", p.relayPort)
             a.put(o)
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, a.toString()).apply()
@@ -179,7 +190,17 @@ object Plugs {
         val list = load(ctx)
         if (list.isEmpty()) { PlugWidget.updateAll(ctx); return@withContext }
         val c = client(ctx)
-        val states = coroutineScope { list.map { p -> async { p.did to c.query(p.ip) } }.awaitAll() }.toMap()
+        val home = onWifi(ctx)
+        val relay = CozyRelay()
+        val states = coroutineScope {
+            list.map { p ->
+                async {
+                    var s = if (home && p.ip.isNotEmpty()) c.query(p.ip) else null
+                    if (s == null && p.hasCloud) s = try { relay.query(p.cloud()) } catch (_: CloudError) { null }
+                    p.did to s
+                }
+            }.awaitAll()
+        }.toMap()
         edit(ctx) { l -> l.map { if (states.containsKey(it.did)) it.copy(on = states[it.did]) else it } }
         PlugWidget.updateAll(ctx)
     }
@@ -190,8 +211,16 @@ object Plugs {
      */
     suspend fun switch(ctx: Context, did: String, on: Boolean): Boolean? = withContext(Dispatchers.IO) {
         val p = load(ctx).firstOrNull { it.did == did } ?: return@withContext null
-        var result = client(ctx).set(p.ip, on)
-        if (result == null && onWifi(ctx)) {
+        val home = onWifi(ctx)
+        // 1. Straight to the plug over the home Wi-Fi.
+        var result = if (home && p.ip.isNotEmpty()) client(ctx).set(p.ip, on) else null
+        // 2. Through CozyLife's cloud, like the CozyLife app (works from anywhere).
+        if (result == null && p.hasCloud) {
+            lastCloudError = null
+            result = try { CozyRelay().set(p.cloud(), on) } catch (e: CloudError) { lastCloudError = e.message; null }
+        }
+        // 3. At home without the cloud: the router may have given the plug a new address.
+        if (result == null && home && !p.hasCloud) {
             scan(ctx)
             val moved = load(ctx).firstOrNull { it.did == did }
             if (moved != null && moved.ip != p.ip) result = client(ctx).set(moved.ip, on)
@@ -199,5 +228,68 @@ object Plugs {
         replace(ctx, did) { it.copy(on = result) }
         PlugWidget.updateAll(ctx)
         result
+    }
+
+    /** Why the last cloud switch failed, in words, if it did. */
+    @Volatile var lastCloudError: String? = null
+
+    // ---- CozyLife account (away mode) ----
+
+    private const val ACCOUNT = "account"
+
+    fun accountEmail(ctx: Context): String? =
+        ctx.getSharedPreferences(ACCOUNT, Context.MODE_PRIVATE).getString("email", null)
+
+    /**
+     * Signs in to CozyLife, then copies each plug's cloud key and relay address (and its
+     * CozyLife name, if you haven't renamed it). Plugs only in the account are added too.
+     * The password isn't kept; only the session.
+     */
+    suspend fun signIn(ctx: Context, email: String, password: String): Int = withContext(Dispatchers.IO) {
+        val acc = CozyAccount()
+        val token = acc.login(email, password)
+        ctx.getSharedPreferences(ACCOUNT, Context.MODE_PRIVATE).edit()
+            .putString("email", email.trim()).putString("token", token).apply()
+        val n = applyCloud(ctx, acc.devices(token))
+        refresh(ctx)
+        n
+    }
+
+    /** Re-reads the account's device list (relay addresses can change). Quietly does nothing when signed out. */
+    suspend fun syncCloud(ctx: Context) = withContext(Dispatchers.IO) {
+        val token = ctx.getSharedPreferences(ACCOUNT, Context.MODE_PRIVATE).getString("token", null)
+            ?: return@withContext
+        try { applyCloud(ctx, CozyAccount().devices(token)) } catch (_: Exception) { }
+    }
+
+    fun signOut(ctx: Context) {
+        ctx.getSharedPreferences(ACCOUNT, Context.MODE_PRIVATE).edit().clear().apply()
+        edit(ctx) { l -> l.map { it.copy(key = "", relayHost = "", relayPort = 0) } }
+        PlugWidget.updateAll(ctx)
+    }
+
+    private fun isDefaultName(n: String) = Regex("Plug \\d+").matches(n)
+
+    private fun applyCloud(ctx: Context, cloud: List<CloudPlug>): Int {
+        var count = 0
+        edit(ctx) { old ->
+            val l = old.toMutableList()
+            for (c in cloud) {
+                count++
+                val i = l.indexOfFirst { it.did == c.did }
+                if (i >= 0) {
+                    val p = l[i]
+                    l[i] = p.copy(
+                        key = c.key, relayHost = c.relayHost, relayPort = c.relayPort,
+                        name = if (isDefaultName(p.name)) c.name else p.name,
+                        ip = p.ip.ifEmpty { c.localIp.orEmpty() },
+                    )
+                } else {
+                    l += Plug(c.did, c.name, c.localIp.orEmpty(), "", null, c.key, c.relayHost, c.relayPort)
+                }
+            }
+            l
+        }
+        return count
     }
 }
