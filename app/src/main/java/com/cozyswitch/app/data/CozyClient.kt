@@ -35,7 +35,7 @@ class CozyClient(
         const val CMD_INFO = 0
         const val CMD_QUERY = 2
         const val CMD_SET = 3
-        private val sn = AtomicLong(System.currentTimeMillis())
+        private val sn = AtomicLong(0)
 
         private const val IDLE_MS = 20_000L
         private class Conn(val s: Socket, val r: ObjectReader) {
@@ -61,7 +61,12 @@ class CozyClient(
                 }
             }.apply { isDaemon = true; start() }
         }
-        fun nextSn(): String = sn.incrementAndGet().toString()
+        /**
+         * The current time in milliseconds, like the CozyLife app (never the same twice). Plugs reject
+         * commands whose sn is too far in the past with res 23, so it must follow the clock, not just
+         * count up from when the app started (that made commands fail after the app had run a while).
+         */
+        fun nextSn(): String = sn.updateAndGet { last -> maxOf(System.currentTimeMillis(), last + 1) }.toString()
 
         fun packet(cmd: Int, sn: String, msg: JSONObject): ByteArray =
             (JSONObject().put("pv", 0).put("cmd", cmd).put("sn", sn).put("msg", msg).toString() + "\r\n")

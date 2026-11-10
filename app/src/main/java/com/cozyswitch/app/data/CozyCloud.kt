@@ -224,6 +224,7 @@ class CozyRelay(private val timeoutMs: Int = 6000) {
                     val reply = try { JSONObject(text) } catch (_: Exception) { continue }
                     if (reply.optString("sn") != sn) continue
                     lastRaw = text.take(200)
+                    if (reply.optInt("res", 0) == 23) throw CloudError("The plug rejected the command (code 23).")
                     val data = reply.optJSONObject("msg")?.optJSONObject("data")
                     return@use if (data != null && data.has("1")) data.optInt("1") > 0 else null
                 }

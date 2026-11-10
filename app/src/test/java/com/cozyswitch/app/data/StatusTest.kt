@@ -3,6 +3,7 @@ package com.cozyswitch.app.data
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class StatusTest {
@@ -28,5 +29,14 @@ class StatusTest {
     @Test fun discoveryProbeIsTheReadOnlyInfoCommand() {
         val p = org.json.JSONObject(Discovery.probe())
         assertEquals(0, p.getInt("cmd"))
+    }
+
+    @Test fun sequenceNumbersFollowTheClockLikeCozyLife() {
+        val a = CozyClient.nextSn().toLong()
+        Thread.sleep(30)
+        val b = CozyClient.nextSn().toLong()
+        val now = System.currentTimeMillis()
+        assertTrue(b > a)
+        assertTrue(now - b < 1000) // current time, not a count from when the app started
     }
 }
