@@ -55,6 +55,8 @@ import com.cozyswitch.app.data.FoundPlug
 import com.cozyswitch.app.data.PlugSetup
 import com.cozyswitch.app.data.Plugs
 import com.cozyswitch.app.data.SavedWifi
+import com.cozyswitch.app.data.WifiNet
+import com.cozyswitch.app.data.WifiNetworks
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
@@ -74,6 +76,27 @@ fun SetupDialog(waiting: List<FoundPlug> = emptyList(), onClose: () -> Unit) {
     var ssid by remember { mutableStateOf(saved?.first ?: currentSsid(ctx)) }
     var pw by remember { mutableStateOf(saved?.second ?: "") }
     var keepWifi by remember { mutableStateOf(true) }
+    var manual by remember { mutableStateOf(false) }
+    val nets = remember { mutableStateListOf<WifiNet>() }
+    var scanningWifi by remember { mutableStateOf(false) }
+    var wifiScanKey by remember { mutableStateOf(0) }
+    var locAllowed by remember { mutableStateOf(WifiNetworks.hasPermission(ctx)) }
+    val askLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        locAllowed = WifiNetworks.hasPermission(ctx)
+        if (!locAllowed) manual = true
+    }
+    // List nearby Wi-Fi whenever the Wi-Fi step is shown (and on Refresh).
+    androidx.compose.runtime.LaunchedEffect(stage, locAllowed, wifiScanKey) {
+        if (stage == Stage.Wifi && locAllowed) {
+            scanningWifi = true
+            val found = WifiNetworks.scan(ctx)
+            nets.clear(); nets.addAll(found)
+            if (ssid.isBlank() || nets.none { it.ssid == ssid }) found.firstOrNull { it.connected && it.has24 }?.let {
+                ssid = it.ssid; pw = SavedWifi.pwFor(ctx, it.ssid) ?: ""
+            }
+            scanningWifi = false
+        }
+    }
     var showPw by remember { mutableStateOf(false) }
     val log = remember { mutableStateListOf<String>() }
     var error by remember { mutableStateOf<String?>(null) }
@@ -137,7 +160,12 @@ fun SetupDialog(waiting: List<FoundPlug> = emptyList(), onClose: () -> Unit) {
     androidx.compose.runtime.LaunchedEffect(Unit) {
         if (session == null) session = Plugs.ensureSession(ctx)
         checkingSession = false
-        if (stage == Stage.Wifi && saved != null && session != null) go()
+        val here = WifiNetworks.current(ctx)
+        val herePw = here?.let { SavedWifi.pwFor(ctx, it) }
+        if (stage == Stage.Wifi && session != null) {
+            if (here != null && herePw != null) { ssid = here; pw = herePw; go() }
+            else if (here == null && saved != null) go()
+        }
     }
 
     Dialog(onDismissRequest = { if (stage != Stage.Working) onClose() },
@@ -212,17 +240,65 @@ fun SetupDialog(waiting: List<FoundPlug> = emptyList(), onClose: () -> Unit) {
                     }
                     Text("Which Wi-Fi should the plug join?", color = Color.White, fontSize = 14.sp)
                     Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(ssid, { ssid = it }, label = { Text("Wi-Fi name") }, singleLine = true,
-                        modifier = Modifier.fillMaxWidth())
-                    Spacer(Modifier.height(6.dp))
-                    OutlinedTextField(pw, { pw = it }, label = { Text("Wi-Fi password") }, singleLine = true,
-                        visualTransformation = if (showPw) VisualTransformation.None else PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        modifier = Modifier.fillMaxWidth())
-                    TextButton(onClick = { showPw = !showPw }) { Text(if (showPw) "Hide password" else "Show password") }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        androidx.compose.material3.Checkbox(keepWifi, { keepWifi = it })
-                        Text("Remember this Wi-Fi for the next plug (stays on this phone only)", color = dim, fontSize = 12.sp)
+                    if (!WifiNetworks.hasPermission(ctx) && !manual) {
+                        Text("To list nearby Wi-Fi, Android needs Location permission for Cozy Switch (it's only used for the Wi-Fi names).",
+                            color = dim, fontSize = 13.sp)
+                        Button(onClick = { askLocation.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)) }) {
+                            Text("Show nearby Wi-Fi")
+                        }
+                    } else if (!manual) {
+                        if (scanningWifi && nets.isEmpty()) Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Looking for Wi-Fi…", color = dim, fontSize = 13.sp)
+                        }
+                        nets.forEach { n ->
+                            val savedPw = SavedWifi.pwFor(ctx, n.ssid)
+                            val selected = n.ssid == ssid
+                            Row(
+                                Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(12.dp))
+                                    .background(if (selected) Color(0xFF2B4766) else Color(0xFF1F2D3B))
+                                    .clickable(enabled = n.has24) {
+                                        ssid = n.ssid
+                                        pw = savedPw ?: ""
+                                        // Known password (or an open network): straight on with the setup.
+                                        if (savedPw != null || n.open) go()
+                                    }.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(n.ssid, color = if (n.has24) Color.White else dim, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                                    Text(listOfNotNull(
+                                        if (n.connected) "Connected" else null,
+                                        if (!n.has24) "5 GHz only, plugs can't use it" else null,
+                                        if (savedPw != null) "password saved" else if (n.open) "open" else null,
+                                    ).joinToString("  ·  ").ifEmpty { " " }, color = if (n.connected) Color(0xFF7DDC9B) else dim, fontSize = 12.sp)
+                                }
+                                Text(when { n.level > -60 -> "▂▄▆"; n.level > -75 -> "▂▄"; else -> "▂" }, color = dim, fontSize = 13.sp)
+                            }
+                        }
+                        Row {
+                            TextButton(onClick = { wifiScanKey++ }) { Text("Refresh") }
+                            TextButton(onClick = { manual = true }) { Text("Other network…") }
+                        }
+                    }
+                    if (manual) {
+                        OutlinedTextField(ssid, { ssid = it }, label = { Text("Wi-Fi name") }, singleLine = true,
+                            modifier = Modifier.fillMaxWidth())
+                    }
+                    // The password only needs typing once per network; after that it's remembered.
+                    if (manual || (ssid.isNotBlank() && SavedWifi.pwFor(ctx, ssid) == null && nets.none { it.ssid == ssid && it.open })) {
+                        Spacer(Modifier.height(6.dp))
+                        if (!manual && ssid.isNotBlank()) Text("Password for $ssid (only needed this once):", color = Color.White, fontSize = 13.sp)
+                        OutlinedTextField(pw, { pw = it }, label = { Text("Wi-Fi password") }, singleLine = true,
+                            visualTransformation = if (showPw) VisualTransformation.None else PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            modifier = Modifier.fillMaxWidth())
+                        TextButton(onClick = { showPw = !showPw }) { Text(if (showPw) "Hide password" else "Show password") }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            androidx.compose.material3.Checkbox(keepWifi, { keepWifi = it })
+                            Text("Remember it on this phone, so next time is one tap", color = dim, fontSize = 12.sp)
+                        }
                     }
                     Text("The password is sent to the plug over Bluetooth, nowhere else.", color = dim, fontSize = 12.sp)
                     Spacer(Modifier.height(12.dp))

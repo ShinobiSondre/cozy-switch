@@ -41,8 +41,18 @@ object SavedWifi {
         val ssid = p.getString("ssid", null) ?: return null
         return ssid to (p.getString("pw", "") ?: "")
     }
-    fun put(ctx: Context, ssid: String, pw: String) =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("ssid", ssid).putString("pw", pw).apply()
+    /** The saved password for one network (Android doesn't let apps read the phone's own), or null. */
+    fun pwFor(ctx: Context, ssid: String): String? = try {
+        val m = org.json.JSONObject(ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("nets", "{}") ?: "{}")
+        if (m.has(ssid)) m.getString(ssid) else get(ctx)?.takeIf { it.first == ssid }?.second
+    } catch (_: Exception) { null }
+
+    fun put(ctx: Context, ssid: String, pw: String) {
+        val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val m = try { org.json.JSONObject(p.getString("nets", "{}") ?: "{}") } catch (_: Exception) { org.json.JSONObject() }
+        m.put(ssid, pw)
+        p.edit().putString("ssid", ssid).putString("pw", pw).putString("nets", m.toString()).apply()
+    }
     fun forget(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
 }
 
