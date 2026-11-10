@@ -250,6 +250,7 @@ object Plugs {
 
     @Volatile private var lastRefresh = 0L
     @Volatile private var lastSummary = ""
+    private val lastDirect = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     /**
      * Updates every plug's state. Like the CozyLife app, it reads from CozyLife's cloud when signed
@@ -290,7 +291,12 @@ object Plugs {
                     when {
                         fromCloud != null -> p.did to (Outcome(fromCloud, if (p.via == "wifi") "wifi" else "cloud", p.fails, p.probeAt) to false)
                         cloudOnline[p.did] == false -> p.did to (Outcome(null, "", p.fails, p.probeAt) to true)
+                        BleHub.isLinked(p.did) || now - (lastDirect[p.did] ?: 0L) < 60_000 ->
+                            // Bluetooth keeps it current, or it was asked directly <1 min ago:
+                            // don't poke it again (asking a lot makes these plugs freeze).
+                            p.did to (null as Pair<Outcome, Boolean>?) // leave it as it is
                         else -> {
+                            lastDirect[p.did] = now
                             // 2. Not in the cloud answer: ask the plug (Wi-Fi, then relay).
                             var o = reach(p, home, System.currentTimeMillis(), { ip -> oneAtATime(p.did) { c.query(ip) } },
                                 { cp -> try { relay.query(cp) } catch (_: CloudError) { null } })

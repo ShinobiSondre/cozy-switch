@@ -353,6 +353,21 @@ private fun Screen(modifier: Modifier = Modifier) {
                 }
             }
             item {
+                var live by remember { mutableStateOf(com.cozyswitch.app.live.LiveService.enabled(ctx)) }
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(CardBg).padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Always ready", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Refreshes plugs and the widget every 10 seconds and keeps connections open, even when " +
+                            "the app is closed. Shows a quiet notification and uses some extra battery.", color = Dim, fontSize = 13.sp)
+                    }
+                    Switch(live, { live = it; com.cozyswitch.app.live.LiveService.setEnabled(ctx, it) },
+                        colors = SwitchDefaults.colors(checkedTrackColor = OnGreen, checkedThumbColor = Color.White))
+                }
+            }
+            item {
                 Text(
                     "Widget: long-press your home screen → Widgets → Cozy Switch. Tap a plug on the widget to switch it.",
                     color = Dim, fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp)

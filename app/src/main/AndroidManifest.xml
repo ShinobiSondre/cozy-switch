@@ -18,6 +18,10 @@
     <!-- Automations: run at the exact minute, and survive a phone restart -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- "Always ready": a background service that keeps plugs and the widget fresh every 10 s -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
 
     <application
         android:allowBackup="true"
@@ -63,6 +67,11 @@
                 <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
             </intent-filter>
         </receiver>
+
+        <service
+            android:name=".live.LiveService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <!-- Gets the result of a self-update from Android's installer -->
         <receiver

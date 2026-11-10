@@ -98,6 +98,7 @@ class RescheduleReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         Scheduler.rescheduleAll(ctx)
         com.cozyswitch.app.data.RefreshWorker.schedule(ctx)
+        com.cozyswitch.app.live.LiveService.start(ctx)
     }
 }
 
