@@ -106,9 +106,22 @@ class PlugSetup(private val ctx: Context) {
 
     // ---- Switching and reconnecting over Bluetooth, like the CozyLife app ----
 
+    /**
+     * The plug at its known Bluetooth address (bt_mac from the account), without scanning, the way
+     * CozyLife connects: set-up plugs may not advertise, but they still accept a connection.
+     */
+    fun direct(did: String): FoundPlug? {
+        val p = Plugs.load(ctx).firstOrNull { it.did == did } ?: return null
+        if (p.btMac.length != 17) return null
+        val dev = try { adapter?.getRemoteDevice(p.btMac) } catch (_: Exception) { null } ?: return null
+        val proto = p.bleProtocol.ifEmpty { "01" }.padStart(2, '0')
+        return FoundPlug(dev, SetupProtocol.Advert(proto, "00", p.pid, did, true), 0)
+    }
+
     /** Finds a set-up plug nearby by its device id (plugs keep advertising after setup). */
     suspend fun near(did: String, ms: Long = 8_000): FoundPlug? {
         seen[did]?.let { if (System.currentTimeMillis() - it.second < 60_000) return it.first }
+        direct(did)?.let { return it }
         return scan(ms, stopWhen = { it.advert.deviceId == did }).firstOrNull { it.advert.deviceId == did }
     }
 

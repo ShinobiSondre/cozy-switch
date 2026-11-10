@@ -21,6 +21,8 @@ data class CloudPlug(
     val relayPort: Int,
     val localIp: String?,
     val online: Boolean,
+    val btMac: String = "",
+    val bleProtocol: String = "",
 )
 
 class CloudError(msg: String) : Exception(msg)
@@ -46,6 +48,9 @@ class CozyAccount(private val base: String = "https://api-us.doiting.com") {
                     val did = d.optString("device_id")
                     val key = d.optString("device_key")
                     if (did.isEmpty() || key.isEmpty()) continue
+                    val extra = try { JSONObject(d.optString("additional_detail").replace("\\", "")) } catch (_: Exception) { null }
+                    val mac = extra?.optString("bt_mac")?.takeIf { it.length == 12 }
+                        ?.chunked(2)?.joinToString(":")?.uppercase().orEmpty()
                     out += CloudPlug(
                         did = did,
                         key = key,
@@ -54,6 +59,8 @@ class CozyAccount(private val base: String = "https://api-us.doiting.com") {
                         relayPort = d.optInt("port", 0),
                         localIp = d.optString("local_ip").ifEmpty { null },
                         online = d.optInt("is_online", 1) != 0,
+                        btMac = mac,
+                        bleProtocol = extra?.optString("device_protocol").orEmpty(),
                     )
                 }
             }
@@ -198,7 +205,9 @@ class CozyRelay(private val timeoutMs: Int = 6000) {
                 s.connect(InetSocketAddress(p.relayHost, p.relayPort), 5000)
                 s.soTimeout = 1000
                 val out = s.getOutputStream()
-                out.write(line(p, "cmd" to "subscribe", "topic" to "device_${p.did}"))
+                // "from=control" marks this as the app listening, not the plug itself. Without it the
+                // relay takes us for the plug and drops the real plug's connection (CozyLife always sends it).
+                out.write(line(p, "cmd" to "subscribe", "topic" to "device_${p.did}", "from" to "control"))
                 out.write(line(p, "cmd" to "publish", "topic" to "control_${p.did}",
                     "message" to URLEncoder.encode(frame, "UTF-8").replace("+", "%20")))
                 out.flush()

@@ -41,6 +41,8 @@ data class Plug(
     val online: Boolean = true,
     val misses: Int = 0,
     val seenAt: Long = 0,
+    val btMac: String = "",
+    val bleProtocol: String = "",
 ) {
     /** Its home-Wi-Fi connection has stopped answering; only unplugging it fixes that. */
     val wifiStuck get() = fails >= STUCK_AFTER
@@ -102,6 +104,8 @@ object Plugs {
                     online = o.optBoolean("online", true),
                     misses = o.optInt("misses", 0),
                     seenAt = o.optLong("seenAt", 0),
+                    btMac = o.optString("btMac"),
+                    bleProtocol = o.optString("bleProtocol"),
                 )
             }
         } catch (_: Exception) {
@@ -117,6 +121,7 @@ object Plugs {
             if (p.on != null) o.put("on", p.on)
             o.put("via", p.via).put("fails", p.fails).put("probeAt", p.probeAt)
                 .put("online", p.online).put("misses", p.misses).put("seenAt", p.seenAt)
+                .put("btMac", p.btMac).put("bleProtocol", p.bleProtocol)
             if (p.hasCloud) o.put("key", p.key).put("relayHost", p.relayHost).put("relayPort", p.relayPort)
             a.put(o)
         }
@@ -341,7 +346,7 @@ object Plugs {
         lastCloudError = null
         val c = client(ctx)
         val now = System.currentTimeMillis()
-        val tryLocal = home && p.ip.isNotEmpty() && (!p.hasCloud || p.fails < STUCK_AFTER || now >= p.probeAt)
+        val tryLocal = home && p.ip.isNotEmpty() // raced in parallel, so always worth trying (it answered in ~50 ms in your log)
         var fails = p.fails
         var probeAt = p.probeAt
 
@@ -362,7 +367,7 @@ object Plugs {
             if (!tryLocal) ConnLog.add(ctx, "${p.name}: Wi-Fi skipped (" + when {
                 !home -> "phone not on Wi-Fi"
                 p.ip.isEmpty() -> "no address known"
-                else -> "stuck, next try " + java.text.SimpleDateFormat("HH:mm", java.util.Locale.ROOT).format(java.util.Date(p.probeAt))
+                else -> "?"
             } + ")")
             // Bluetooth, if a standing link is up (CozyLife sends every tap over Bluetooth too).
             if (BleHub.isLinked(did)) jobs += race.launch {
@@ -551,11 +556,13 @@ object Plugs {
                     val p = l[i]
                     l[i] = p.copy(
                         key = c.key, relayHost = c.relayHost, relayPort = c.relayPort,
+                        btMac = c.btMac.ifEmpty { p.btMac }, bleProtocol = c.bleProtocol.ifEmpty { p.bleProtocol },
                         name = if (isDefaultName(p.name)) c.name else p.name,
                         ip = p.ip.ifEmpty { c.localIp.orEmpty() },
                     )
                 } else {
-                    l += Plug(c.did, c.name, c.localIp.orEmpty(), "", null, c.key, c.relayHost, c.relayPort)
+                    l += Plug(c.did, c.name, c.localIp.orEmpty(), "", null, c.key, c.relayHost, c.relayPort,
+                        btMac = c.btMac, bleProtocol = c.bleProtocol)
                 }
             }
             l

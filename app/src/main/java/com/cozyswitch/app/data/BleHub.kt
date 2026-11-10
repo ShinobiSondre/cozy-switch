@@ -52,9 +52,12 @@ object BleHub {
         val plugs = Plugs.load(ctx)
         val missing = plugs.filter { !isLinked(it.did) }
         if (missing.isEmpty()) return
-        val heard = setup.scan(8_000, stopWhen = { f -> missing.all { m -> m.did == f.advert.deviceId || isLinked(m.did) } })
+        // Like CozyLife: connect straight to each plug's known Bluetooth address; scan only for the rest.
+        val needScan = missing.filter { setup.direct(it.did) == null }
+        val heard = if (needScan.isEmpty()) emptyList()
+        else setup.scan(8_000, stopWhen = { f -> needScan.all { m -> m.did == f.advert.deviceId || isLinked(m.did) } })
         for (p in missing) {
-            val f = heard.firstOrNull { it.advert.deviceId == p.did } ?: continue
+            val f = setup.direct(p.did) ?: heard.firstOrNull { it.advert.deviceId == p.did } ?: continue
             val link = setup.Link(f)
             try {
                 link.open()

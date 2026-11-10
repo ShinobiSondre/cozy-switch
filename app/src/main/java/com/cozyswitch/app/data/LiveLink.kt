@@ -21,6 +21,8 @@ import java.util.concurrent.ConcurrentLinkedQueue
  */
 object LiveLink {
     private class Relay(val host: String, val port: Int) {
+        @Volatile var retryAt = 0L
+        @Volatile var backoff = 5_000L
         @Volatile var socket: Socket? = null
         val subscribed = ConcurrentHashMap<String, String>() // did -> key
         val pending = ConcurrentHashMap<String, CompletableDeferred<JSONObject>>()
@@ -39,7 +41,7 @@ object LiveLink {
     fun start(ctx: Context) {
         appCtx = ctx.applicationContext
         stopAt = 0L
-        if (running) { sync(); return }
+        if (running) return
         running = true
         keeper = Thread { loop() }.apply { isDaemon = true; name = "cozy-live-link"; start() }
     }
@@ -79,9 +81,17 @@ object LiveLink {
         for (k in relays.keys.toList()) if (k !in want) relays.remove(k)?.let { close(it, "no plugs on it") }
         for ((k, list) in want) {
             val r = relays.getOrPut(k) { Relay(list[0].relayHost, list[0].relayPort) }
-            if (!r.alive) open(r) ?: continue
+            if (!r.alive) {
+                if (System.currentTimeMillis() < r.retryAt) continue
+                if (open(r) == null) {
+                    r.retryAt = System.currentTimeMillis() + r.backoff
+                    r.backoff = (r.backoff * 2).coerceAtMost(120_000)
+                    continue
+                }
+                r.backoff = 5_000
+            }
             for (p in list) if (r.subscribed[p.did] != p.key) {
-                write(r, "cmd=subscribe&topic=device_${p.did}&device_id=${p.did}&device_key=${p.key}")
+                write(r, "cmd=subscribe&topic=device_${p.did}&from=control&device_id=${p.did}&device_key=${p.key}")
                 r.subscribed[p.did] = p.key
             }
         }
