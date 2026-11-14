@@ -507,6 +507,14 @@ private fun Screen(modifier: Modifier = Modifier) {
     }
 }
 
+/** Words and colour for a Wi-Fi signal strength in dBm. */
+private fun signalLabel(r: Int): Pair<String, Color> = when {
+    r >= -60 -> "strong ▂▄▆█" to Color(0xFF7DDC9B)
+    r >= -70 -> "good ▂▄▆" to Color(0xFFB9E39B)
+    r >= -80 -> "weak ▂▄" to Color(0xFFFFC94A)
+    else -> "very weak ▂" to Color(0xFFFF8A80)
+}
+
 @Composable
 private fun PlugCard(p: Plug, busy: Boolean, onToggle: (Boolean) -> Unit, onEdit: () -> Unit, onReconnect: () -> Unit = {}) {
     val on = p.on == true
@@ -531,7 +539,13 @@ private fun PlugCard(p: Plug, busy: Boolean, onToggle: (Boolean) -> Unit, onEdit
                     when (p.via) { "wifi" -> "  ·  via Wi-Fi"; "cloud" -> "  ·  via cloud ☁"; "bluetooth" -> "  ·  via Bluetooth"; else -> "" },
                 color = if (!p.online) Color(0xFFFFB27A) else Dim, fontSize = 12.sp
             )
+            p.rssi?.let { r ->
+                val (label, col) = signalLabel(r)
+                Text("Wi-Fi signal: $label ($r dBm)", color = col, fontSize = 12.sp)
+            }
             val hint = when {
+                p.rssi != null && p.rssi < -75 && p.online ->
+                    "Weak Wi-Fi is the most common reason a plug drops off. Moving it closer to the router (or adding a mesh point) helps."
                 !p.online -> "Not answering. Tap Reconnect (uses Bluetooth, stand near the plug). If that fails, unplug it for 10 seconds."
                 p.wifiStuck && p.via == "cloud" ->
                     "Its Wi-Fi connection is stuck, so the cloud is used. Unplugging it for 10 s fixes that."

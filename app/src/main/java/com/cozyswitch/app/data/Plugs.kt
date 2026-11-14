@@ -43,6 +43,9 @@ data class Plug(
     val seenAt: Long = 0,
     val btMac: String = "",
     val bleProtocol: String = "",
+    /** Wi-Fi signal the plug reported (dBm), null if not known yet. */
+    val rssi: Int? = null,
+    val rssiAt: Long = 0,
 ) {
     /** Its home-Wi-Fi connection has stopped answering; only unplugging it fixes that. */
     val wifiStuck get() = fails >= STUCK_AFTER
@@ -106,6 +109,8 @@ object Plugs {
                     seenAt = o.optLong("seenAt", 0),
                     btMac = o.optString("btMac"),
                     bleProtocol = o.optString("bleProtocol"),
+                    rssi = if (o.has("rssi")) o.optInt("rssi") else null,
+                    rssiAt = o.optLong("rssiAt", 0),
                 )
             }
         } catch (_: Exception) {
@@ -121,7 +126,8 @@ object Plugs {
             if (p.on != null) o.put("on", p.on)
             o.put("via", p.via).put("fails", p.fails).put("probeAt", p.probeAt)
                 .put("online", p.online).put("misses", p.misses).put("seenAt", p.seenAt)
-                .put("btMac", p.btMac).put("bleProtocol", p.bleProtocol)
+                .put("btMac", p.btMac).put("bleProtocol", p.bleProtocol).put("rssiAt", p.rssiAt)
+            if (p.rssi != null) o.put("rssi", p.rssi)
             if (p.hasCloud) o.put("key", p.key).put("relayHost", p.relayHost).put("relayPort", p.relayPort)
             a.put(o)
         }
@@ -255,6 +261,7 @@ object Plugs {
 
     @Volatile private var lastRefresh = 0L
     @Volatile private var lastSummary = ""
+    @Volatile private var lastSignalCheck = 0L
     private val lastDirect = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     /**
@@ -283,6 +290,20 @@ object Plugs {
                 // CozyLife answered but refused: usually an expired sign-in. (Network trouble isn't this.)
                 if (e.message?.startsWith("Couldn't reach") != true) cloudProblem = e.message
             } catch (_: Exception) { }
+        }
+
+        // On home Wi-Fi, every 5 minutes: the quick "who's there?" call. Each plug answers with its
+        // address and its Wi-Fi signal, without being disturbed (it answers even if its TCP port froze).
+        if (onWifi(ctx) && now - lastSignalCheck > 5 * 60_000) {
+            lastSignalCheck = now
+            val heard = try { Discovery.all(ctx) } catch (_: Exception) { emptyList() }
+            if (heard.isNotEmpty()) edit(ctx) { l ->
+                l.map { p ->
+                    val ip = heard.firstOrNull { it.first == p.did }?.second
+                    val sig = Discovery.signal[p.did]?.takeIf { now - it.second < 60_000 }
+                    p.copy(ip = ip ?: p.ip, rssi = sig?.first ?: p.rssi, rssiAt = if (sig != null) now else p.rssiAt)
+                }
+            }
         }
 
         val list = load(ctx)

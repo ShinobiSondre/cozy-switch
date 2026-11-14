@@ -39,4 +39,9 @@ class StatusTest {
         assertTrue(b > a)
         assertTrue(now - b < 1000) // current time, not a count from when the app started
     }
+
+    @Test fun readsTheSignalFromADiscoveryAnswer() {
+        assertEquals(-33, Discovery.rssiOf("""{"cmd":0,"pv":0,"sn":"1","msg":{"did":"629168597cb94c4c1d8f","rssi":-33},"res":0}"""))
+        assertNull(Discovery.rssiOf("""{"cmd":0,"msg":{"did":"x"}}"""))
+    }
 }

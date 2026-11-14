@@ -18,6 +18,9 @@ import java.net.SocketTimeoutException
 object Discovery {
     private const val PORT = 6095
 
+    /** Each plug's Wi-Fi signal (dBm) from its last answer, with when it was heard. */
+    val signal = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Long>>()
+
     /** Every plug that answers: (device id, address). */
     fun all(ctx: Context, timeoutMs: Int = 2500): List<Pair<String, String>> = listen(ctx, null, timeoutMs)
 
@@ -54,7 +57,9 @@ object Discovery {
                     s.soTimeout = left
                     val pkt = DatagramPacket(buf, buf.size)
                     try { s.receive(pkt) } catch (_: SocketTimeoutException) { break }
-                    val did = parse(String(pkt.data, 0, pkt.length)) ?: continue
+                    val text = String(pkt.data, 0, pkt.length)
+                    val did = parse(text) ?: continue
+                    rssiOf(text)?.let { signal[did] = it to System.currentTimeMillis() }
                     out[did] = pkt.address.hostAddress ?: continue
                     if (did == want) break
                 }
@@ -64,6 +69,11 @@ object Discovery {
     }
 
     internal fun probe() = JSONObject().put("cmd", 0).put("pv", 0).put("sn", CozyClient.nextSn()).put("msg", JSONObject()).toString()
+
+    /** The plug's Wi-Fi signal strength (dBm) from a discovery answer, or null. */
+    internal fun rssiOf(s: String): Int? = try {
+        JSONObject(s.trim()).optJSONObject("msg")?.let { if (it.has("rssi")) it.getInt("rssi") else null }?.takeIf { it in -120..0 }
+    } catch (_: Exception) { null }
 
     /** The device id from a discovery answer, or null. */
     internal fun parse(s: String): String? = try {
